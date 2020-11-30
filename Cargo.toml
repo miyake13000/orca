@@ -7,4 +7,5 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-#fork = "0.1.18"
+nix = "0.19.0"
+pentry = "0.1.*"
