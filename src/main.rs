@@ -1,15 +1,18 @@
+// orca : CLI Container Runtime
 // This program is created by nomlab in Okayama University
-// https://github.com/miyake13000/crca
+// author nomlab <https://github.com/nomlab>
+//        miyake13000 <https://github.com/miyake13000/crca>
 
-//use fork::{daemon, Fork};
-//use std::process::{Command, Child, Stdio};
-use std::process::Command;
-//use std::os::unix::io::{AsRawFd, FromRawFd};
 #[macro_use]
 extern crate clap;
 use clap::{App, Arg, SubCommand};
 
 fn main() {
+    let input = cli();
+    parse_input(input);
+}
+
+fn cli() -> App<'static, 'static> {
     let app = App::new(crate_name!())
         .version(crate_version!())
         .author(crate_authors!())
@@ -37,8 +40,11 @@ fn main() {
                 .long("flag")
             )
         );
+    return app
+}
 
-    let matches = app.get_matches();
+fn parse_input(input :App){
+    let matches = input.get_matches();
 
     if let Some(o) = matches.value_of("pa") {
         println!("Value for pa: {}", o);
