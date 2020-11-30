@@ -1,0 +1,9 @@
+[package]
+name = "orca"
+version = "0.1.0"
+authors = ["miyake13000 <pnpm01sm@s.okayama-u.ac.jp>"]
+edition = "2020"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
