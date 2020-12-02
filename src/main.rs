@@ -9,33 +9,35 @@ use clap::{App, Arg, SubCommand};
 
 fn main() {
     let input = cli();
-    parse_input(input);
+    let path = formatter(&input);
+    println!("command : {}", path);
 }
 
 fn cli() -> App<'static, 'static> {
+
     let app = App::new(crate_name!())
         .version(crate_version!())
         .author(crate_authors!())
         .about(crate_description!())
-        .arg(Arg::with_name("pa")
-            .help("positional argument")
+        .arg(Arg::with_name("command")
+            .help("command to execute in conainer")
             .required(true)
         )
         .arg(Arg::with_name("flg")
-            .help("flag")
+            .help("test flag")
             .short("f")
             .long("flag")
         )
         .arg(Arg::with_name("opt")
-            .help("option")
+            .help("test option")
             .short("o")
             .long("option")
             .takes_value(true)
         )
         .subcommand(SubCommand::with_name("sub")
-            .about("suncommand")
+            .about("test suncommand")
             .arg(Arg::with_name("subflg")
-                .help("sub flag")
+                .help("test subcommand flag")
                 .short("f")
                 .long("flag")
             )
@@ -43,18 +45,12 @@ fn cli() -> App<'static, 'static> {
     return app
 }
 
-fn parse_input(input :App){
+fn formatter<'a>(input: &'a App) -> &'a str {
     let matches = input.get_matches();
 
-    if let Some(o) = matches.value_of("pa") {
-        println!("Value for pa: {}", o);
-    }
-    if let Some(o) = matches.value_of("opt") {
-        println!("Value for opt: {}", o);
-    }
-    println!("flg is {}", if matches.is_present("flg") {"true"} else {"false"});
-    if let Some(ref matches) = matches.subcommand_matches("sub") {
-        println!("uysed sub");
-        println!("subflg is {}", if matches.is_present("subflg") {"true"} else {"false"});
+    if let Some(o) = matches.value_of("command") {
+        o
+    }else {
+        ""
     }
 }
