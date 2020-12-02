@@ -24,7 +24,7 @@ fn main() {
 
     let p = clone(cb, stack, clone_flags, None);
     match p {
-        Ok(_pid)  => println!("success"),
+        Ok(_pid)  => println!("success to clone"),
         Err(_err) => println!("failes to clone process"),
     };
 }
@@ -32,12 +32,15 @@ fn main() {
 fn child() -> isize {
     print_process_info();
 
+    let mut argv: Vec<&CStr> = Vec::new();
     let path = CStr::from_bytes_with_nul(b"/bin/ls\0").unwrap();
-    let arg = CStr::from_bytes_with_nul(b"-al\0").unwrap();
+    argv.push(path);
+    let arg = CStr::from_bytes_with_nul(b"-la\0").unwrap();
+    argv.push(arg);
 
-    let res = unistd::execv(path, &[arg]);
+    let res = unistd::execv(path, &argv);
     match res {
-        Ok(_ok) => println!("Success exec"),
+        Ok(_ok) => println!("Success to exec"),
         Err(_err) => println!("failed to exec"),
     }
 
