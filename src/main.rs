@@ -1,18 +1,25 @@
+// orca : CLI Container Runtime
 // This program is created by nomlab in Okayama University
-// https://github.com/miyake13000/crca
+// author nomlab <https://github.com/nomlab>
+//        miyake13000 <https://github.com/miyake13000/crca>
 
 extern crate pentry;
 extern crate nix;
+#[macro_use]
+extern crate clap;
 use nix::sched::*;
 use nix::unistd;
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
+use clap::{App, Arg};
 
 fn main() {
-    print_process_info();
+    let input = cli();
+    let matches = input.get_matches();
+    let path = formatter(&matches);
 
     const STACK_SIZE: usize = 1024 * 1024;
     let ref mut stack: [u8; STACK_SIZE] = [0; STACK_SIZE];
-    let cb = Box::new(|| child());
+    let cb = Box::new(|| child(path));
 
     let mut clone_flags = CloneFlags::empty();
     clone_flags.insert(CloneFlags::CLONE_NEWUSER);
@@ -29,16 +36,17 @@ fn main() {
     };
 }
 
-fn child() -> isize {
+fn child(path: &str) -> isize {
     print_process_info();
 
     let mut argv: Vec<&CStr> = Vec::new();
-    let path = CStr::from_bytes_with_nul(b"/bin/ls\0").unwrap();
-    argv.push(path);
-    let arg = CStr::from_bytes_with_nul(b"-la\0").unwrap();
-    argv.push(arg);
 
-    let res = unistd::execv(path, &argv);
+    let path_cstring = CString::new(path).expect("failed to CString::new");
+    let path_cstr = CStr::from_bytes_with_nul(path_cstring.to_bytes_with_nul()).expect("failed to assign to CStr from CString");
+    println!("path:{}", path_cstr.to_str().unwrap());
+    argv.push(path_cstr);
+
+    let res = unistd::execv(path_cstr, &argv);
     match res {
         Ok(_ok) => println!("Success to exec"),
         Err(_err) => println!("failed to exec"),
@@ -51,4 +59,24 @@ fn print_process_info() {
     if let Ok(ps) = pentry::current() {
         println!("{:?}", ps);
     };
+}
+
+fn cli() -> App<'static, 'static> {
+    let app = App::new(crate_name!())
+        .version(crate_version!())
+        .author(crate_authors!())
+        .about(crate_description!())
+        .arg(Arg::with_name("command")
+             .help("command to execute in conainer")
+             .required(false)
+            );
+    return app
+}
+
+fn formatter<'a>(matches: &'a clap::ArgMatches) -> &'a str {
+    if let Some(o) = matches.value_of("command") {
+        o
+    }else {
+        "/bin/bash"
+    }
 }
