@@ -9,6 +9,7 @@ extern crate nix;
 extern crate clap;
 use nix::sched::*;
 use nix::unistd;
+use nix::mount;
 use std::ffi::{CStr, CString};
 use clap::{App, Arg};
 
@@ -19,6 +20,7 @@ fn main() {
 
     const STACK_SIZE: usize = 1024 * 1024;
     let ref mut stack: [u8; STACK_SIZE] = [0; STACK_SIZE];
+
     let cb = Box::new(|| child(path));
 
     let mut clone_flags = CloneFlags::empty();
@@ -31,7 +33,7 @@ fn main() {
 
     let p = clone(cb, stack, clone_flags, None);
     match p {
-        Ok(_pid)  => println!("success to clone"),
+        Ok(_pid)  => println!("success to clone process"),
         Err(_err) => println!("failes to clone process"),
     };
 }
@@ -39,10 +41,15 @@ fn main() {
 fn child(path: &str) -> isize {
     print_process_info();
 
+    mount("proc", "/proc", "proc", "");
+    mount("devpts", "/dev/pts", "devpts", "");
+
     let mut argv: Vec<&CStr> = Vec::new();
 
     let path_cstring = CString::new(path).expect("failed to CString::new");
-    let path_cstr = CStr::from_bytes_with_nul(path_cstring.to_bytes_with_nul()).expect("failed to assign to CStr from CString");
+    let path_cstr = CStr::from_bytes_with_nul(path_cstring
+                                              .to_bytes_with_nul())
+                                              .expect("failed to assign to CStr from CString");
     println!("path:{}", path_cstr.to_str().unwrap());
     argv.push(path_cstr);
 
@@ -59,6 +66,15 @@ fn print_process_info() {
     if let Ok(ps) = pentry::current() {
         println!("{:?}", ps);
     };
+}
+
+fn mount(src: &str, trg: &str, fstyp: &str, data: &str) {
+    mount::mount(Some(src),
+                 trg,
+                 Some(fstyp),
+                 mount::MsFlags::empty(),
+                 Some(data))
+                .expect("failed to mount");
 }
 
 fn cli() -> App<'static, 'static> {
