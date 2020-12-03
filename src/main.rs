@@ -9,7 +9,8 @@ use clap::{App, Arg, SubCommand};
 
 fn main() {
     let input = cli();
-    let path = formatter(&input);
+    let matches = input.get_matches();
+    let path = formatter(&matches);
     println!("command : {}", path);
 }
 
@@ -21,36 +22,34 @@ fn cli() -> App<'static, 'static> {
         .about(crate_description!())
         .arg(Arg::with_name("command")
             .help("command to execute in conainer")
-            .required(true)
-        )
-        .arg(Arg::with_name("flg")
-            .help("test flag")
-            .short("f")
-            .long("flag")
-        )
-        .arg(Arg::with_name("opt")
-            .help("test option")
-            .short("o")
-            .long("option")
-            .takes_value(true)
-        )
-        .subcommand(SubCommand::with_name("sub")
-            .about("test suncommand")
-            .arg(Arg::with_name("subflg")
-                .help("test subcommand flag")
-                .short("f")
-                .long("flag")
-            )
+            .required(false)
         );
+//        .arg(Arg::with_name("flg")
+//            .help("test flag")
+//            .short("f")
+//            .long("flag")
+//        )
+//        .arg(Arg::with_name("opt")
+//            .help("test option")
+//            .short("o")
+//            .long("option")
+//            .takes_value(true)
+//        )
+//        .subcommand(SubCommand::with_name("sub")
+//            .about("test suncommand")
+//            .arg(Arg::with_name("subflg")
+//                .help("test subcommand flag")
+//                .short("f")
+//                .long("flag")
+//            )
+//        );
     return app
 }
 
-fn formatter<'a>(input: &'a App) -> &'a str {
-    let matches = input.get_matches();
-
+fn formatter<'a>(matches: &'a clap::ArgMatches) -> &'a str {
     if let Some(o) = matches.value_of("command") {
         o
     }else {
-        ""
+        "bash"
     }
 }
