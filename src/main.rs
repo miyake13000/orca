@@ -7,7 +7,7 @@
 extern crate clap;
 extern crate nix;
 extern crate libc;
-use nix::sched::*;
+use nix::sched;
 use nix::unistd;
 use nix::mount;
 use nix::sys::wait;
@@ -21,27 +21,10 @@ fn main() {
 
     const STACK_SIZE: usize = 1024 * 1024;
     let ref mut stack: [u8; STACK_SIZE] = [0; STACK_SIZE];
-
     let cb = Box::new(|| child(path));
 
-    let mut clone_flags = CloneFlags::empty();
-    clone_flags.insert(CloneFlags::CLONE_NEWUSER);
-    clone_flags.insert(CloneFlags::CLONE_NEWUTS);
-    clone_flags.insert(CloneFlags::CLONE_NEWIPC);
-    clone_flags.insert(CloneFlags::CLONE_NEWPID);
-    clone_flags.insert(CloneFlags::CLONE_NEWNET);
-    clone_flags.insert(CloneFlags::CLONE_NEWNS);
-
-    let pid = clone(cb, stack, clone_flags, Some(libc::SIGCHLD));
-    match pid {
-        Ok(_pid)  => println!("success to clone"),
-        Err(_err) => println!("failed to clone"),
-    };
-    let res = wait::wait();
-    match res {
-        Ok(_ok) => println!("Success to wait"),
-        Err(_err) => println!("failed to wait"),
-    }
+    clone(cb, stack).expect("failed to clone");
+    wait::wait().expect("failed to wait child process");
 }
 
 fn child(path: &str) -> isize {
@@ -55,13 +38,24 @@ fn child(path: &str) -> isize {
                                               .to_bytes_with_nul())
                                               .expect("failed to assign to CStr from CString");
     argv.push(path_cstr);
+    unistd::execvp(path_cstr, &argv).expect("failed to execvp");
 
-    let res = unistd::execvp(path_cstr, &argv);
-    match res {
-        Ok(_ok) => println!("Success to exec"),
-        Err(_err) => println!("failed to exec"),
-    }
     return 0;
+}
+
+fn clone(cb: sched::CloneCb, stack: &mut [u8]) -> nix::Result<unistd::Pid> {
+
+    let mut flags = sched::CloneFlags::empty();
+    flags.insert(sched::CloneFlags::CLONE_NEWUSER);
+    flags.insert(sched::CloneFlags::CLONE_NEWUTS);
+    flags.insert(sched::CloneFlags::CLONE_NEWIPC);
+    flags.insert(sched::CloneFlags::CLONE_NEWPID);
+    flags.insert(sched::CloneFlags::CLONE_NEWNET);
+    flags.insert(sched::CloneFlags::CLONE_NEWNS);
+
+    let signal = Some(libc::SIGCHLD);
+
+    sched::clone(cb, stack, flags, signal)
 }
 
 fn mount(src: &str, trg: &str, fstyp: &str, data: &str) {
