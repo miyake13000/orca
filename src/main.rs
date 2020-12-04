@@ -23,22 +23,22 @@ fn main() {
     let ref mut stack: [u8; STACK_SIZE] = [0; STACK_SIZE];
     let cb = Box::new(|| child(path));
 
-    clone(cb, stack).expect("failed to clone");
-    wait::wait().expect("failed to wait child process");
+    clone(cb, stack).expect("clone");
+    wait::wait().expect("wait");
 }
 
 fn child(path: &str) -> isize {
-    mount("proc", "/proc", "proc", "");
-    mount("devpts", "/dev/pts", "devpts", "");
+    mount("proc", "/proc", "proc", "").expect("mount proc");
+    mount("devpts", "/dev/pts", "devpts", "").expect("mount devpts");
 
     let mut argv: Vec<&CStr> = Vec::new();
 
-    let path_cstring = CString::new(path).expect("failed to CString::new");
+    let path_cstring = CString::new(path).expect("CString::new");
     let path_cstr = CStr::from_bytes_with_nul(path_cstring
                                               .to_bytes_with_nul())
-                                              .expect("failed to assign to CStr from CString");
+                                              .expect("CString to CStr");
     argv.push(path_cstr);
-    unistd::execvp(path_cstr, &argv).expect("failed to execvp");
+    unistd::execvp(path_cstr, &argv).expect("execvp");
 
     return 0;
 }
@@ -58,13 +58,12 @@ fn clone(cb: sched::CloneCb, stack: &mut [u8]) -> nix::Result<unistd::Pid> {
     sched::clone(cb, stack, flags, signal)
 }
 
-fn mount(src: &str, trg: &str, fstyp: &str, data: &str) {
+fn mount(src: &str, trg: &str, fstyp: &str, data: &str) -> nix::Result<()> {
     mount::mount(Some(src),
                  trg,
                  Some(fstyp),
                  mount::MsFlags::empty(),
                  Some(data))
-                .expect("failed to mount");
 }
 
 fn cli() -> App<'static, 'static> {
