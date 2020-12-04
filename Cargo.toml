@@ -10,5 +10,4 @@ description = "Container Runtime written by Rust"
 [dependencies]
 nix = "0.19.0"
 libc = "0.2.80"
-pentry = "0.1.*"
 clap = "2.20.3"

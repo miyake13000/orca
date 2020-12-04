@@ -3,10 +3,9 @@
 // author nomlab <https://github.com/nomlab>
 //        miyake13000 <https://github.com/miyake13000/crca>
 
-extern crate pentry;
-extern crate nix;
 #[macro_use]
 extern crate clap;
+extern crate nix;
 extern crate libc;
 use nix::sched::*;
 use nix::unistd;
@@ -14,7 +13,6 @@ use nix::mount;
 use nix::sys::wait;
 use std::ffi::{CStr, CString};
 use clap::{App, Arg};
-use libc::SIGCHLD;
 
 fn main() {
     let input = cli();
@@ -34,16 +32,12 @@ fn main() {
     clone_flags.insert(CloneFlags::CLONE_NEWNET);
     clone_flags.insert(CloneFlags::CLONE_NEWNS);
 
-    let sig_flag_bits: libc::c_int = SIGCHLD;
-    let sig_flag: CloneFlags = CloneFlags::from_bits(sig_flag_bits).expect("failed to change SIGCHLD to CloneFlags");
-    clone_flags.insert(sig_flag);
-
-    let pid = clone(cb, stack, clone_flags, None);
+    let pid = clone(cb, stack, clone_flags, Some(libc::SIGCHLD));
     match pid {
         Ok(_pid)  => println!("success to clone"),
         Err(_err) => println!("failed to clone"),
     };
-    let res = wait::waitpid(pid.unwrap(), Some(wait::WaitPidFlag::WEXITED));
+    let res = wait::wait();
     match res {
         Ok(_ok) => println!("Success to wait"),
         Err(_err) => println!("failed to wait"),
@@ -51,8 +45,6 @@ fn main() {
 }
 
 fn child(path: &str) -> isize {
-    print_process_info();
-
     mount("proc", "/proc", "proc", "");
     mount("devpts", "/dev/pts", "devpts", "");
 
@@ -62,7 +54,6 @@ fn child(path: &str) -> isize {
     let path_cstr = CStr::from_bytes_with_nul(path_cstring
                                               .to_bytes_with_nul())
                                               .expect("failed to assign to CStr from CString");
-    println!("path:{}", path_cstr.to_str().unwrap());
     argv.push(path_cstr);
 
     let res = unistd::execvp(path_cstr, &argv);
@@ -70,14 +61,7 @@ fn child(path: &str) -> isize {
         Ok(_ok) => println!("Success to exec"),
         Err(_err) => println!("failed to exec"),
     }
-
     return 0;
-}
-
-fn print_process_info() {
-    if let Ok(ps) = pentry::current() {
-        println!("{:?}", ps);
-    };
 }
 
 fn mount(src: &str, trg: &str, fstyp: &str, data: &str) {
