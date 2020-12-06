@@ -7,11 +7,10 @@
 extern crate clap;
 extern crate nix;
 extern crate libc;
-use nix::sched;
-use nix::unistd;
-use nix::mount;
-use nix::sys::wait;
+use nix::{sched, unistd, mount, sys};
 use std::ffi::{CStr, CString};
+use std::fs;
+use std::io::Write;
 use clap::{App, Arg};
 
 fn main() {
@@ -23,8 +22,10 @@ fn main() {
     let ref mut stack: [u8; STACK_SIZE] = [0; STACK_SIZE];
     let cb = Box::new(|| child(path));
 
-    clone(cb, stack).expect("clone");
-    wait::wait().expect("wait");
+    let pid = clone(cb, stack).expect("clone");
+    let pid_int = pid.as_raw() as i32;
+    id_map(pid_int, 0, 1000, 1).expect("set_uid");
+    sys::wait::wait().expect("wait");
 }
 
 fn child(path: &str) -> isize {
@@ -41,6 +42,17 @@ fn child(path: &str) -> isize {
     unistd::execvp(path_cstr, &argv).expect("execvp");
 
     return 0;
+}
+
+fn id_map(pid: i32, innner_id: u32, outer_id: u32, lenge: u32) -> std::io::Result<usize> {
+    let path = format!("{}{}", "/proc/", pid.to_string());
+    let path_uid = format!("{}{}", path, "/uid_map");
+    //let path_gid = format!("{}{}", path, "/gid_map");
+    let content = format!("{} {} {}", innner_id, outer_id, lenge);
+    let mut file_uid = fs::File::create(path_uid).unwrap();
+    //let mut file_gid = fs::File::create(path_gid).unwrap();
+    file_uid.write(content.as_bytes())
+    //file_gid.write(content.as_bytes())
 }
 
 fn clone(cb: sched::CloneCb, stack: &mut [u8]) -> nix::Result<unistd::Pid> {
