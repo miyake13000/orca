@@ -57,12 +57,15 @@ fn child(path: &str) -> isize {
 fn id_map(pid: i32, innner_id: u32, outer_id: u32, lenge: u32) -> std::io::Result<usize> {
     let path = format!("{}{}", "/proc/", pid.to_string());
     let path_uid = format!("{}{}", path, "/uid_map");
-    //let path_gid = format!("{}{}", path, "/gid_map");
+    let path_gid = format!("{}{}", path, "/gid_map");
+    let path_setg = format!("{}{}", path, "/setgroups");
     let content = format!("{} {} {}", innner_id, outer_id, lenge);
     let mut file_uid = fs::File::create(path_uid).unwrap();
-    //let mut file_gid = fs::File::create(path_gid).unwrap();
-    file_uid.write(content.as_bytes())
-    //file_gid.write(content.as_bytes())
+    let mut file_gid = fs::File::create(path_gid).unwrap();
+    let mut file_setg = fs::File::create(path_setg).unwrap();
+    file_uid.write(content.as_bytes()).expect("write uid");
+    file_setg.write(b"deny").expect("write setg");
+    file_gid.write(content.as_bytes())
 }
 
 fn clone(cb: sched::CloneCb, stack: &mut [u8]) -> nix::Result<unistd::Pid> {
