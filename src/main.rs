@@ -29,6 +29,10 @@ fn main() {
 }
 
 fn child(path: &str) -> isize {
+
+    unistd::chdir("/home/miyake/tmp/rootfs").expect("chdir");
+    unistd::chroot("/home/miyake/tmp/rootfs").expect("chroot");
+
     mount("proc", "/proc", "proc", "").expect("mount proc");
     mount("devpts", "/dev/pts", "devpts", "").expect("mount devpts");
 
@@ -39,7 +43,13 @@ fn child(path: &str) -> isize {
                                               .to_bytes_with_nul())
                                               .expect("CString to CStr");
     argv.push(path_cstr);
-    unistd::execvp(path_cstr, &argv).expect("execvp");
+
+    let mut envp: Vec<&CStr> = Vec::new();
+    envp.push(CStr::from_bytes_with_nul(b"SHELL=/bin/bash\0").expect("env shell"));
+    envp.push(CStr::from_bytes_with_nul(b"HOME=/root\0").expect("env home"));
+    envp.push(CStr::from_bytes_with_nul(b"TERM=xterm-256color\0").expect("env term"));
+
+    unistd::execvpe(path_cstr, &argv, &envp).expect("execvpe");
 
     return 0;
 }
