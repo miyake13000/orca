@@ -24,7 +24,8 @@ fn main() {
 
     let pid = clone(cb, stack).expect("clone");
     let pid_int = pid.as_raw() as i32;
-    id_map(pid_int, 0, 1000, 1).expect("set_uid");
+    let uid = unistd::getuid().as_raw() as u32;
+    id_map(pid_int, 0, uid, 1).expect("set_uid");
     sys::wait::wait().expect("wait");
 }
 
