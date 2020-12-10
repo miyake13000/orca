@@ -34,6 +34,8 @@ fn child(path: &str) -> isize {
     unistd::chdir("/home/miyake/tmp/rootfs").expect("chdir");
     unistd::chroot("/home/miyake/tmp/rootfs").expect("chroot");
 
+    unistd::sethostname("debian").expect("sethostname");
+
     mount("proc", "/proc", "proc", "").expect("mount proc");
     mount("devpts", "/dev/pts", "devpts", "").expect("mount devpts");
 
