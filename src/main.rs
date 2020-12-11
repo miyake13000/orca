@@ -14,13 +14,13 @@ use std::io::Write;
 use clap::{App, Arg};
 
 fn main() {
-    let input = cli();
+    let input = get_input();
     let matches = input.get_matches();
-    let path = formatter(&matches);
+    let command = formatter(&matches);
 
     const STACK_SIZE: usize = 1024 * 1024;
     let ref mut stack: [u8; STACK_SIZE] = [0; STACK_SIZE];
-    let cb = Box::new(|| child(path));
+    let cb = Box::new(|| child(command));
 
     let pid = clone(cb, stack).expect("clone");
     let pid_int = pid.as_raw() as i32;
@@ -94,7 +94,7 @@ fn mount(src: &str, trg: &str, fstyp: &str, data: &str) -> nix::Result<()> {
                  Some(data))
 }
 
-fn cli() -> App<'static, 'static> {
+fn get_input() -> App<'static, 'static> {
     let app = App::new(crate_name!())
         .version(crate_version!())
         .author(crate_authors!())
