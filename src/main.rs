@@ -74,7 +74,6 @@ impl Image {
 
     pub fn get(&self) -> Result<(), ()> {
         let url = format!("https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/{}:pull", self.dest_name);
-        println!("url:{}",url);
         let client = reqwest::blocking::Client::new();
         let resp = client.get(&url)
             .send()
