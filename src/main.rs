@@ -74,6 +74,7 @@ impl Image {
 
     pub fn get(&self) -> Result<(), ()> {
         let url = format!("https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/{}:pull", self.dest_name);
+        println!("url:{}",url);
         let client = reqwest::blocking::Client::new();
         let resp = client.get(&url)
             .send()
@@ -125,19 +126,6 @@ fn main() {
     let matches = input.get_matches();
     let command = formatter(&matches);
 
-    const STACK_SIZE: usize = 1024 * 1024;
-    let ref mut stack: [u8; STACK_SIZE] = [0; STACK_SIZE];
-    let cb = Box::new(|| child(command));
-
-    let pid = clone(cb, stack).expect("clone");
-    let pid_int = pid.as_raw() as i32;
-    let uid = unistd::getuid().as_raw() as u32;
-    id_map(pid_int, 0, uid, 1).expect("set_uid");
-    sys::wait::wait().expect("wait");
-}
-
-fn child(command: &str) -> isize {
-
     let image = Image::new(String::from("debian"), String::from("latest"));
     if  !image.exist() {
         println!("Cannot find container image on local");
@@ -148,9 +136,22 @@ fn child(command: &str) -> isize {
         println!("done");
     }
 
-    //let path = format!("{}/rootfs", image.path.to_str().unwrap());
-    unistd::chdir("/home/miyake/.local/orca/containers/debian/latest/rootfs/").expect("chdir");
-    unistd::chroot("/home/miyake/.local/orca/containers/debian/latest/rootfs/").expect("chroot");
+    const STACK_SIZE: usize = 1024 * 1024;
+    let ref mut stack: [u8; STACK_SIZE] = [0; STACK_SIZE];
+    let cb = Box::new(|| child(command, &image));
+
+    let pid = clone(cb, stack).expect("clone");
+    let pid_int = pid.as_raw() as i32;
+    let uid = unistd::getuid().as_raw() as u32;
+    id_map(pid_int, 0, uid, 1).expect("set_uid");
+    sys::wait::wait().expect("wait");
+}
+
+fn child(command: &str, image: &Image) -> isize {
+    let path = format!("{}/rootfs", image.path.to_str().unwrap());
+    let path_buf = PathBuf::from(path);
+    unistd::chdir(path_buf.as_path()).expect("chdir");
+    unistd::chroot(path_buf.as_path()).expect("chroot");
     unistd::sethostname(&image.dest_name).expect("sethostname");
 
     create_dir_all("/proc").unwrap();
