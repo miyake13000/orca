@@ -13,6 +13,113 @@ use std::fs;
 use std::io::Write;
 use clap::{App, Arg};
 
+extern crate reqwest;
+extern crate serde;
+extern crate serde_json;
+use serde::{Deserialize, Serialize};
+use std::io;
+use std::fs::{File, create_dir_all};
+use std::path::{Path, PathBuf};
+use flate2::read::GzDecoder;
+use tar::Archive;
+use dirs::home_dir;
+
+#[derive(Serialize, Deserialize)]
+#[allow(non_snake_case)]
+struct Res1 {
+    token: String,
+    access_token: String,
+    expires_in: u32,
+    issued_at: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[allow(non_snake_case)]
+struct Config {
+    mediaType: String,
+    size: usize,
+    digest: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[allow(non_snake_case)]
+struct Res2 {
+    schemaVersion: usize,
+    mediaType: String,
+    config: Config,
+    layers: Vec<Config>,
+}
+
+pub struct Image {
+    dest_name: String,
+    dest_tag:  String,
+    path: PathBuf,
+}
+
+impl Image {
+    pub fn new(name: String, tag: String) -> Image {
+        let mut path = PathBuf::new();
+        let home_dir = home_dir().unwrap();
+        path.push(home_dir);
+        path.push(".local/orca/containers");
+        path.push(&name);
+        path.push(&tag);
+
+        Image{dest_name: name, dest_tag: tag, path: path}
+    }
+
+    pub fn exist(&self) -> bool {
+        Path::new(self.path.as_path()).exists()
+    }
+
+    pub fn get(&self) -> Result<(), ()> {
+        let url = format!("https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/{}:pull", self.dest_name);
+        let client = reqwest::blocking::Client::new();
+        let resp = client.get(&url)
+            .send()
+            .unwrap()
+            .text()
+            .unwrap();
+        let res_json: Res1 = serde_json::from_str(&resp).unwrap();
+        let token = &res_json.token;
+
+        let url = format!("https://registry-1.docker.io/v2/library/{}/manifests/{}", self.dest_name, self.dest_tag);
+        let client = reqwest::blocking::Client::new();
+        let resp = client.get(&url)
+            .header(reqwest::header::ACCEPT, "application/vnd.docker.distribution.manifest.v2+json")
+            .bearer_auth(token)
+            .send()
+            .unwrap()
+            .text()
+            .unwrap();
+        let res_json: Res2 = serde_json::from_str(&resp).unwrap();
+        let layer_id = &res_json.layers[0].digest;
+
+        let url = format!("https://registry-1.docker.io/v2/library/{}/blobs/{}", self.dest_name, layer_id);
+        let client = reqwest::blocking::Client::new();
+        let mut resp = client.get(&url)
+            .bearer_auth(token)
+            .send()
+            .unwrap();
+
+        create_dir_all(self.path.as_path()).expect("create directory");
+        let path = format!("{}/image.tar.gz", self.path.to_str().unwrap());
+        let mut file = File::create(path).expect("file create");
+        io::copy(&mut resp, &mut file).expect("copy");
+        Ok(())
+    }
+
+    pub fn extract(&self) -> Result<(), ()> {
+        let path = format!("{}/image.tar.gz", self.path.to_str().unwrap());
+        let tar_gz = File::open(path).expect("file open");
+        let tar = GzDecoder::new(tar_gz);
+        let mut archive = Archive::new(tar);
+        let path = format!("{}/rootfs", self.path.to_str().unwrap());
+        archive.unpack(path).expect("unpack");
+        Ok(())
+    }
+}
+
 fn main() {
     let input = get_input();
     let matches = input.get_matches();
@@ -29,30 +136,42 @@ fn main() {
     sys::wait::wait().expect("wait");
 }
 
-fn child(path: &str) -> isize {
+fn child(command: &str) -> isize {
 
-    unistd::chdir("/home/miyake/tmp/rootfs").expect("chdir");
-    unistd::chroot("/home/miyake/tmp/rootfs").expect("chroot");
+    let image = Image::new(String::from("debian"), String::from("latest"));
+    if  !image.exist() {
+        println!("Cannot find container image on local");
+        println!("Downloading container image...");
+        image.get().unwrap();
+        println!("Extracting container image...");
+        image.extract().unwrap();
+        println!("done");
+    }
 
-    unistd::sethostname("debian").expect("sethostname");
+    //let path = format!("{}/rootfs", image.path.to_str().unwrap());
+    unistd::chdir("/home/miyake/.local/orca/containers/debian/latest/rootfs/").expect("chdir");
+    unistd::chroot("/home/miyake/.local/orca/containers/debian/latest/rootfs/").expect("chroot");
+    unistd::sethostname(&image.dest_name).expect("sethostname");
 
+    create_dir_all("/proc").unwrap();
     mount("proc", "/proc", "proc", "").expect("mount proc");
+    create_dir_all("/dev/pts").unwrap();
     mount("devpts", "/dev/pts", "devpts", "").expect("mount devpts");
 
     let mut argv: Vec<&CStr> = Vec::new();
 
-    let path_cstring = CString::new(path).expect("CString::new");
-    let path_cstr = CStr::from_bytes_with_nul(path_cstring
+    let command_cstring = CString::new(command).expect("CString::new");
+    let command_cstr = CStr::from_bytes_with_nul(command_cstring
                                               .to_bytes_with_nul())
                                               .expect("CString to CStr");
-    argv.push(path_cstr);
+    argv.push(command_cstr);
 
     let mut envp: Vec<&CStr> = Vec::new();
     envp.push(CStr::from_bytes_with_nul(b"SHELL=/bin/bash\0").expect("env shell"));
     envp.push(CStr::from_bytes_with_nul(b"HOME=/root\0").expect("env home"));
     envp.push(CStr::from_bytes_with_nul(b"TERM=xterm-256color\0").expect("env term"));
 
-    unistd::execvpe(path_cstr, &argv, &envp).expect("execvpe");
+    unistd::execvpe(command_cstr, &argv, &envp).expect("execvpe");
 
     return 0;
 }
@@ -113,3 +232,4 @@ fn formatter<'a>(matches: &'a clap::ArgMatches) -> &'a str {
         "/bin/bash"
     }
 }
+
