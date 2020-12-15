@@ -99,9 +99,9 @@ fn child(command: &str, path: &str, dest_name: &str) -> isize {
     argv.push(command_cstr);
 
     let mut envp: Vec<&CStr> = Vec::new();
-    envp.push(CStr::from_bytes_with_nul(b"SHELL=/bin/bash\0").unwrap());
+    envp.push(CStr::from_bytes_with_nul(b"SHELL=/bin/sh\0").unwrap());
     envp.push(CStr::from_bytes_with_nul(b"HOME=/root\0").unwrap());
-    envp.push(CStr::from_bytes_with_nul(b"TERM=xterm-256color\0").unwrap());
+    envp.push(CStr::from_bytes_with_nul(b"TERM=xterm\0").unwrap());
     envp.push(CStr::from_bytes_with_nul(b"PATH=/bin:/usr/bin:/sbin:/usr/sbin\0").unwrap());
 
     unistd::execvpe(command_cstr, &argv, &envp).expect("execvpe");
