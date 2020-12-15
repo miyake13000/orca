@@ -7,14 +7,14 @@
 extern crate clap;
 extern crate nix;
 extern crate libc;
+extern crate dirs;
 
 use nix::{sched, unistd, mount, sys};
 use std::ffi::{CStr, CString};
 use std::io::{self, Write};
 use std::fs::{self, File};
 use std::path::Path;
-use clap::{App, Arg};
-use dirs::home_dir;
+use clap::{App, Arg, ArgMatches};
 
 mod image;
 
@@ -37,7 +37,7 @@ fn main() {
     let input = formatter(&matches, name, tag, command);
 
     // variables in main function
-    let home_dir = home_dir().unwrap();
+    let home_dir = dirs::home_dir().unwrap();
     let home_dir_str = home_dir.to_str().unwrap();
     let path = format!("{}/.local/orca/containers/{}/{}", home_dir_str, input.name, input.tag);
     let path_image = format!("{}/image.tar.gz", path);
@@ -169,7 +169,7 @@ fn get_input() -> App<'static, 'static> {
     return app
 }
 
-fn formatter<'a>(matches: &'a clap::ArgMatches, default_name: &'a str, default_tag: &'a str, default_command: &'a str) -> Input<'a, 'a, 'a> {
+fn formatter<'a>(matches: &'a ArgMatches, default_name: &'a str, default_tag: &'a str, default_command: &'a str) -> Input<'a, 'a, 'a> {
     let name = if let Some(o) = matches.value_of("name") {
         o
     }else {
