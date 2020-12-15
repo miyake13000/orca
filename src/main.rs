@@ -1,25 +1,22 @@
 // orca : CLI Container Runtime
 // This program is created by nomlab in Okayama University
 // author nomlab <https://github.com/nomlab>
-//        miyake13000 <https://github.com/miyake13000/crca>
+//        miyake13000 <https://github.com/miyake13000/orca>
 
 #[macro_use]
 extern crate clap;
 extern crate nix;
 extern crate libc;
-use nix::{sched, unistd, mount, sys};
-use std::ffi::{CStr, CString};
-use std::fs;
-use std::io::Write;
-use clap::{App, Arg};
-
 extern crate reqwest;
 extern crate serde;
 extern crate serde_json;
-use serde::{Deserialize, Serialize};
-use std::io;
+use nix::{sched, unistd, mount, sys};
+use std::ffi::{CStr, CString};
+use std::io::{Write, copy, Result};
 use std::fs::{File, create_dir_all};
 use std::path::{Path, PathBuf};
+use clap::{App, Arg};
+use serde::{Deserialize, Serialize};
 use flate2::read::GzDecoder;
 use tar::Archive;
 use dirs::home_dir;
@@ -53,26 +50,38 @@ struct Res2 {
 pub struct Image {
     dest_name: String,
     dest_tag:  String,
-    path: PathBuf,
+    path_image: PathBuf,
+    path_rootfs: PathBuf,
 }
 
 impl Image {
-    pub fn new(name: String, tag: String) -> Image {
-        let mut path = PathBuf::new();
-        let home_dir = home_dir().unwrap();
-        path.push(home_dir);
-        path.push(".local/orca/containers");
-        path.push(&name);
-        path.push(&tag);
+    pub fn new(name: String, tag: String, path: String) -> Image {
+        let mut path_image = PathBuf::from(&path);
+        let mut path_rootfs = PathBuf::from(&path);
+        path_image.push("image.tar.gz");
+        path_rootfs.push("rootfs");
 
-        Image{dest_name: name, dest_tag: tag, path: path}
+        Image{
+            dest_name: name,
+            dest_tag: tag,
+            path_image: path_image,
+            path_rootfs: path_rootfs
+        }
     }
 
-    pub fn exist(&self) -> bool {
-        Path::new(self.path.as_path()).exists()
+    pub fn exist_image(&self) -> bool {
+        Path::new(self.path_image.as_path()).exists()
     }
 
-    pub fn get(&self) -> Result<(), ()> {
+    pub fn exist_rootfs(&self) -> bool {
+        Path::new(self.path_rootfs.as_path()).exists()
+    }
+
+    pub fn create_dir(&self) -> Result<()> {
+        create_dir_all(self.path_rootfs.as_path())
+    }
+
+    pub fn get(&self) -> Result<()> {
         let url = format!("https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/{}:pull", self.dest_name);
         let client = reqwest::blocking::Client::new();
         let resp = client.get(&url)
@@ -102,21 +111,16 @@ impl Image {
             .send()
             .unwrap();
 
-        create_dir_all(self.path.as_path()).expect("create directory");
-        let path = format!("{}/image.tar.gz", self.path.to_str().unwrap());
-        let mut file = File::create(path).expect("file create");
-        io::copy(&mut resp, &mut file).expect("copy");
+        let mut file = File::create(self.path_image.as_path()).expect("file create");
+        copy(&mut resp, &mut file).unwrap();
         Ok(())
     }
 
-    pub fn extract(&self) -> Result<(), ()> {
-        let path = format!("{}/image.tar.gz", self.path.to_str().unwrap());
-        let tar_gz = File::open(path).expect("file open");
+    pub fn extract(&self) -> Result<()> {
+        let tar_gz = File::open(self.path_image.as_path()).expect("file open");
         let tar = GzDecoder::new(tar_gz);
         let mut archive = Archive::new(tar);
-        let path = format!("{}/rootfs", self.path.to_str().unwrap());
-        archive.unpack(path).expect("unpack");
-        Ok(())
+        archive.unpack(self.path_rootfs.as_path())
     }
 }
 
@@ -125,14 +129,21 @@ fn main() {
     let matches = input.get_matches();
     let command = formatter(&matches);
 
-    let image = Image::new(String::from("debian"), String::from("latest"));
-    if  !image.exist() {
+    let dest_name = String::from("debian");
+    let dest_tag = String::from("latest");
+    let home_dir = home_dir().unwrap();
+    let home_dir_str = home_dir.to_str().unwrap();
+    let path = format!("{}/.local/orca/containers/{}/{}", home_dir_str, dest_name, dest_tag);
+    let image = Image::new(dest_name, dest_tag, path);
+    if  !image.exist_image() {
         println!("Cannot find container image on local");
+        image.create_dir().unwrap();
         println!("Downloading container image...");
         image.get().unwrap();
+    }
+    if !image.exist_rootfs() {
         println!("Extracting container image...");
         image.extract().unwrap();
-        println!("done");
     }
 
     const STACK_SIZE: usize = 1024 * 1024;
@@ -147,10 +158,8 @@ fn main() {
 }
 
 fn child(command: &str, image: &Image) -> isize {
-    let path = format!("{}/rootfs", image.path.to_str().unwrap());
-    let path_buf = PathBuf::from(path);
-    unistd::chdir(path_buf.as_path()).expect("chdir");
-    unistd::chroot(path_buf.as_path()).expect("chroot");
+    unistd::chdir(image.path_rootfs.as_path()).expect("chdir");
+    unistd::chroot(image.path_rootfs.as_path()).expect("chroot");
     unistd::sethostname(&image.dest_name).expect("sethostname");
 
     create_dir_all("/proc").unwrap();
@@ -176,15 +185,15 @@ fn child(command: &str, image: &Image) -> isize {
     return 0;
 }
 
-fn id_map(pid: i32, innner_id: u32, outer_id: u32, lenge: u32) -> std::io::Result<usize> {
+fn id_map(pid: i32, innner_id: u32, outer_id: u32, lenge: u32) -> Result<usize> {
     let path = format!("{}{}", "/proc/", pid.to_string());
     let path_uid = format!("{}{}", path, "/uid_map");
     let path_gid = format!("{}{}", path, "/gid_map");
     let path_setg = format!("{}{}", path, "/setgroups");
     let content = format!("{} {} {}", innner_id, outer_id, lenge);
-    let mut file_uid = fs::File::create(path_uid).unwrap();
-    let mut file_gid = fs::File::create(path_gid).unwrap();
-    let mut file_setg = fs::File::create(path_setg).unwrap();
+    let mut file_uid = File::create(path_uid).unwrap();
+    let mut file_gid = File::create(path_gid).unwrap();
+    let mut file_setg = File::create(path_setg).unwrap();
     file_uid.write(content.as_bytes()).expect("write uid");
     file_setg.write(b"deny").expect("write setg");
     file_gid.write(content.as_bytes())
