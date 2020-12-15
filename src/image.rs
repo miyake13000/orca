@@ -8,9 +8,8 @@ extern crate serde_json;
 use serde::{Deserialize, Serialize};
 use flate2::read::GzDecoder;
 use tar::Archive;
-use std::path::{Path, PathBuf};
-use std::io::{copy, Result};
-use std::fs::{File, create_dir_all};
+use std::io::{self, copy};
+use std::fs::File;
 
 #[derive(Serialize, Deserialize)]
 #[allow(non_snake_case)]
@@ -38,41 +37,20 @@ struct Res2 {
     layers: Vec<Config>,
 }
 
-pub struct Image {
-    pub dest_name: String,
-    pub dest_tag:  String,
-    pub path_image: PathBuf,
-    pub path_rootfs: PathBuf,
+pub struct Image<'a, 'b> {
+    pub dest_name: &'a str,
+    pub dest_tag:  &'b str,
 }
 
-impl Image {
-    pub fn new(name: String, tag: String, path: String) -> Image {
-        let mut path_image = PathBuf::from(&path);
-        let mut path_rootfs = PathBuf::from(&path);
-        path_image.push("image.tar.gz");
-        path_rootfs.push("rootfs");
-
+impl Image<'_, '_> {
+    pub fn new<'a>(name: &'a str, tag: &'a str) -> Image<'a, 'a> {
         Image{
             dest_name: name,
             dest_tag: tag,
-            path_image: path_image,
-            path_rootfs: path_rootfs
         }
     }
 
-    pub fn exist_image(&self) -> bool {
-        Path::new(self.path_image.as_path()).exists()
-    }
-
-    pub fn exist_rootfs(&self) -> bool {
-        Path::new(self.path_rootfs.as_path()).exists()
-    }
-
-    pub fn create_dir(&self) -> Result<()> {
-        create_dir_all(self.path_rootfs.as_path())
-    }
-
-    pub fn get(&self) -> Result<()> {
+    pub fn get_token(&self) -> io::Result<String> {
         let url = format!("https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/{}:pull", self.dest_name);
         let client = reqwest::blocking::Client::new();
         let resp = client.get(&url)
@@ -81,8 +59,10 @@ impl Image {
             .text()
             .unwrap();
         let res_json: Res1 = serde_json::from_str(&resp).unwrap();
-        let token = &res_json.token;
+        Ok(res_json.token)
+    }
 
+    pub fn get_layer_id(&self, token: &str) -> io::Result<String> {
         let url = format!("https://registry-1.docker.io/v2/library/{}/manifests/{}", self.dest_name, self.dest_tag);
         let client = reqwest::blocking::Client::new();
         let resp = client.get(&url)
@@ -93,8 +73,25 @@ impl Image {
             .text()
             .unwrap();
         let res_json: Res2 = serde_json::from_str(&resp).unwrap();
-        let layer_id = &res_json.layers[0].digest;
+        Ok((&res_json.layers[0].digest).to_string())
+    }
 
+    #[allow(dead_code)]
+    pub fn get_var(&self, token: &str, image_id: &str) -> io::Result<(String, String)> {
+        let url = format!("https://registry-1.docker.io/v2/library/{}/blobs/{}", self.dest_name, image_id);
+
+        let client = reqwest::blocking::Client::new();
+        let resp = client.get(&url)
+            .bearer_auth(token)
+            .send()
+            .unwrap()
+            .text()
+            .unwrap();
+        let _res_json: Res2 = serde_json::from_str(&resp).unwrap();
+        Ok((String::from(""), String::from("")))
+    }
+
+    pub fn download(&self, token: &str, layer_id: &str, path: &str) -> io::Result<()> {
         let url = format!("https://registry-1.docker.io/v2/library/{}/blobs/{}", self.dest_name, layer_id);
         let client = reqwest::blocking::Client::new();
         let mut resp = client.get(&url)
@@ -102,15 +99,15 @@ impl Image {
             .send()
             .unwrap();
 
-        let mut file = File::create(self.path_image.as_path()).expect("file create");
+        let mut file = File::create(path).expect("file create");
         copy(&mut resp, &mut file).unwrap();
         Ok(())
     }
 
-    pub fn extract(&self) -> Result<()> {
-        let tar_gz = File::open(self.path_image.as_path()).expect("file open");
+    pub fn extract(&self, path_src: &str, path_dist: &str) -> io::Result<()> {
+        let tar_gz = File::open(path_src).expect("file open");
         let tar = GzDecoder::new(tar_gz);
         let mut archive = Archive::new(tar);
-        archive.unpack(self.path_rootfs.as_path())
+        archive.unpack(path_dist)
     }
 }
