@@ -42,6 +42,7 @@ fn main() {
     let path = format!("{}/.local/orca/containers/{}/{}", home_dir_str, input.name, input.tag);
     let path_image = format!("{}/image.tar.gz", path);
     let path_rootfs = format!("{}/rootfs", path);
+    let path_newroot = format!("{}/newroot", path);
     let image = image::Image::new(input.name, input.tag);
 
     // download container image if it doesnt exist
@@ -65,7 +66,8 @@ fn main() {
     // variable for child process
     const STACK_SIZE: usize = 1024 * 1024;
     let ref mut stack: [u8; STACK_SIZE] = [0; STACK_SIZE];
-    let cb = Box::new(|| child(input.command, &path_rootfs, image.dest_name));
+    fs::create_dir_all(&path_newroot).unwrap();
+    let cb = Box::new(|| child(input.command, &path_rootfs, &path_newroot, image.dest_name));
 
     // create child process
     let pid = clone(cb, stack).unwrap();
@@ -79,16 +81,21 @@ fn main() {
     sys::wait::wait().expect("wait");
 }
 
-fn child(command: &str, path: &str, dest_name: &str) -> isize {
+fn child(command: &str, path_rootfs: &str, path_newroot: &str, dest_name: &str) -> isize {
 
-    unistd::chdir(path).expect("chdir");
-    unistd::chroot(path).expect("chroot");
+    mount(path_rootfs, path_newroot, "", mount::MsFlags::MS_BIND, "").unwrap();
+    unistd::chdir(path_newroot).expect("chdir");
+    fs::create_dir_all("oldroot").unwrap();
+    unistd::pivot_root(".", "oldroot").unwrap();
+    unistd::chroot(".").expect("chroot");
+    mount::umount("oldroot").expect("umount oldroot");
     unistd::sethostname(dest_name).expect("sethostname");
 
+
     fs::create_dir_all("/proc").unwrap();
-    mount("proc", "/proc", "proc", "").expect("mount proc");
+    mount("proc", "/proc", "proc",mount::MsFlags::empty(), "").expect("mount proc");
     fs::create_dir_all("/dev/pts").unwrap();
-    mount("devpts", "/dev/pts", "devpts", "").expect("mount devpts");
+    mount("devpts", "/dev/pts", "devpts",mount::MsFlags::empty(), "").expect("mount devpts");
 
     let mut argv: Vec<&CStr> = Vec::new();
 
@@ -138,11 +145,11 @@ fn clone(cb: sched::CloneCb, stack: &mut [u8]) -> nix::Result<unistd::Pid> {
     sched::clone(cb, stack, flags, signal)
 }
 
-fn mount(src: &str, trg: &str, fstyp: &str, data: &str) -> nix::Result<()> {
+fn mount(src: &str, trg: &str, fstyp: &str, flag: mount::MsFlags, data: &str) -> nix::Result<()> {
     mount::mount(Some(src),
                  trg,
                  Some(fstyp),
-                 mount::MsFlags::empty(),
+                 flag,
                  Some(data))
 }
 
