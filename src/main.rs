@@ -94,8 +94,8 @@ fn child(command: &str, path: &str, dest_name: &str) -> isize {
 
     let command_cstring = CString::new(command).expect("CString::new");
     let command_cstr = CStr::from_bytes_with_nul(command_cstring
-                                              .to_bytes_with_nul())
-                                              .expect("CString to CStr");
+                                                 .to_bytes_with_nul())
+        .expect("CString to CStr");
     argv.push(command_cstr);
 
     let mut envp: Vec<&CStr> = Vec::new();
@@ -140,10 +140,10 @@ fn clone(cb: sched::CloneCb, stack: &mut [u8]) -> nix::Result<unistd::Pid> {
 
 fn mount(src: &str, trg: &str, fstyp: &str, data: &str) -> nix::Result<()> {
     mount::mount(Some(src),
-                 trg,
-                 Some(fstyp),
-                 mount::MsFlags::empty(),
-                 Some(data))
+    trg,
+    Some(fstyp),
+    mount::MsFlags::empty(),
+    Some(data))
 }
 
 fn get_input() -> App<'static, 'static> {
@@ -156,13 +156,13 @@ fn get_input() -> App<'static, 'static> {
              .long("name")
              .help("name of container image")
              .takes_value(true)
-        )
+            )
         .arg(Arg::with_name("tag")
              .short("t")
              .long("tag")
              .help("tag of container iamge")
              .takes_value(true)
-        )
+            )
         .arg(Arg::with_name("command")
              .help("command to execute in conainer")
             );
@@ -192,3 +192,42 @@ fn formatter<'a>(matches: &'a ArgMatches, default_name: &'a str, default_tag: &'
     }
 }
 
+use std::time::Instant;
+//    use std::io::{self, Write};
+//    use std::fs::{self, File};
+//    use std::path::Path;
+//    use clap::{App, Arg, ArgMatches};
+//
+//    mod super::image;
+//
+#[test]
+fn bench_image() {
+    println!("start bench");
+
+    let name = "debian";
+    let tag  = "latest";
+    let home_dir = dirs::home_dir().unwrap();
+    let home_dir_str = home_dir.to_str().unwrap();
+    let path = format!("{}/.local/orca/containers/{}/{}", home_dir_str, name, tag);
+    let path_image = format!("{}/image.tar.gz", path);
+    let path_rootfs = format!("{}/rootfs", path);
+
+    let image = image::Image::new(name, tag);
+
+    let start = Instant::now();
+    println!("start get_token");
+    let token = image.get_token().unwrap();
+    println!("end get_token {}ms", start.elapsed().as_millis());
+    println!("start get_leyaer_id");
+    let layer_id = image.get_layer_id(&token).unwrap();
+    println!("end get_layer_id {}ms", start.elapsed().as_millis());
+    fs::create_dir_all(&path).unwrap();
+    println!("start download");
+    image.download(&token, &layer_id, &path_image).unwrap();
+    println!("end download {}ms", start.elapsed().as_millis());
+    println!("start extract");
+    fs::create_dir_all(&path_rootfs).unwrap();
+    image.extract(&path_image, &path_rootfs).unwrap();
+    println!("end extract {}ms", start.elapsed().as_millis());
+    println!("end bench");
+}
