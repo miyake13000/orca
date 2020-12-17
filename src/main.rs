@@ -13,7 +13,6 @@ use std::ffi::{CStr, CString};
 use std::io::{self, Write};
 use std::fs::{self, File};
 use std::path::Path;
-use std::process::Command;
 use clap::{App, Arg, ArgMatches};
 use nix::{sched, unistd, mount, sys};
 
@@ -61,11 +60,6 @@ fn main() {
         println!("Extracting...");
         fs::create_dir_all(&path_rootfs).unwrap();
         image.extract(&path_image, &path_rootfs).unwrap();
-        let _ = Command::new("archivemount")
-                         .arg(path_image)
-                         .arg(path_rootfs)
-                         .output()
-                         .unwrap();
     }
 
     // variable for child process

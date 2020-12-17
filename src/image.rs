@@ -6,10 +6,9 @@ extern crate serde;
 extern crate serde_json;
 
 use serde::{Deserialize, Serialize};
-use flate2::read::GzDecoder;
-use tar::Archive;
 use std::io::{self, copy};
 use std::fs::File;
+use std::process::Command;
 
 #[derive(Serialize, Deserialize)]
 #[allow(non_snake_case)]
@@ -104,10 +103,14 @@ impl Image<'_, '_> {
         Ok(())
     }
 
-    pub fn extract(&self, path_src: &str, path_dist: &str) -> io::Result<()> {
-        let tar_gz = File::open(path_src).expect("file open");
-        let tar = GzDecoder::new(tar_gz);
-        let mut archive = Archive::new(tar);
-        archive.unpack(path_dist)
+    pub fn extract(&self, path_src: &str, path_dest: &str) -> io::Result<()> {
+        let _ = Command::new("tar")
+                         .arg("-xzf")
+                         .arg(path_src)
+                         .arg("-C")
+                         .arg(path_dest)
+                         .output()
+                         .expect("exec tar");
+        Ok(())
     }
 }
