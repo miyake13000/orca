@@ -204,30 +204,39 @@ use std::time::Instant;
 fn bench_image() {
     println!("start bench");
 
-    let name = "debian";
+    let name = "alpine";
     let tag  = "latest";
     let home_dir = dirs::home_dir().unwrap();
     let home_dir_str = home_dir.to_str().unwrap();
     let path = format!("{}/.local/orca/containers/{}/{}", home_dir_str, name, tag);
     let path_image = format!("{}/image.tar.gz", path);
     let path_rootfs = format!("{}/rootfs", path);
-
     let image = image::Image::new(name, tag);
 
     let start = Instant::now();
+
     println!("start get_token");
     let token = image.get_token().unwrap();
-    println!("end get_token {}ms", start.elapsed().as_millis());
+    let res1 = start.elapsed().as_millis();
+    println!("end get_token {}ms", res1);
+
     println!("start get_leyaer_id");
     let layer_id = image.get_layer_id(&token).unwrap();
-    println!("end get_layer_id {}ms", start.elapsed().as_millis());
+    let res2 = start.elapsed().as_millis();
+    println!("end get_layer_id {}ms", res2 - res1);
+
     fs::create_dir_all(&path).unwrap();
+
     println!("start download");
     image.download(&token, &layer_id, &path_image).unwrap();
-    println!("end download {}ms", start.elapsed().as_millis());
+    let res3 = start.elapsed().as_millis();
+    println!("end download {}ms", res3- res2);
+
     println!("start extract");
     fs::create_dir_all(&path_rootfs).unwrap();
     image.extract(&path_image, &path_rootfs).unwrap();
-    println!("end extract {}ms", start.elapsed().as_millis());
+    let res4 = start.elapsed().as_millis();
+    println!("end extract {}ms", res4 - res3);
+
     println!("end bench");
 }
