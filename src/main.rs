@@ -22,6 +22,8 @@ struct Input<'a, 'b, 'c> {
     name: &'a str,
     tag: &'b str,
     command: &'c str,
+    init_flag: bool,
+    remove_flag: bool,
 }
 
 fn main() {
@@ -44,6 +46,7 @@ fn main() {
     let path_rootfs = format!("{}/rootfs", path);
     let image = image::Image::new(input.name, input.tag);
 
+
     // download container image if it doesnt exist
     if !Path::new(&path_image).exists() {
         println!("Cannot find container image on local");
@@ -60,6 +63,14 @@ fn main() {
         println!("Extracting...");
         fs::create_dir_all(&path_rootfs).unwrap();
         image.extract(&path_image, &path_rootfs).unwrap();
+    } else {
+        // init setting for container image
+        if input.init_flag {
+            fs::remove_dir_all(&path_rootfs).unwrap();
+            println!("Extracting...");
+            fs::create_dir_all(&path_rootfs).unwrap();
+            image.extract(&path_image, &path_rootfs).unwrap();
+        }
     }
 
     // variable for child process
@@ -77,6 +88,11 @@ fn main() {
 
     // wait for child process exiting
     sys::wait::wait().expect("wait");
+
+    // terminating process for caontainer image
+    if input.remove_flag {
+        fs::remove_dir_all(&path_rootfs).unwrap();
+    }
 }
 
 fn child(command: &str, path_rootfs: &str, dest_name: &str) -> isize {
@@ -147,10 +163,10 @@ fn clone(cb: sched::CloneCb, stack: &mut [u8]) -> nix::Result<unistd::Pid> {
 
 fn mount(src: &str, trg: &str, fstyp: &str, flag: mount::MsFlags, data: &str) -> nix::Result<()> {
     mount::mount(Some(src),
-                 trg,
-                 Some(fstyp),
-                 flag,
-                 Some(data))
+    trg,
+    Some(fstyp),
+    flag,
+    Some(data))
 }
 
 fn get_input() -> App<'static, 'static> {
@@ -169,6 +185,16 @@ fn get_input() -> App<'static, 'static> {
              .long("tag")
              .help("tag of container iamge")
              .takes_value(true)
+            )
+        .arg(Arg::with_name("init")
+             .short("i")
+             .long("init")
+             .help("initialize contaier environment")
+            )
+        .arg(Arg::with_name("remove")
+             .short("r")
+             .long("remove")
+             .help("remove container environment after executing")
             )
         .arg(Arg::with_name("command")
              .help("command to execute in conainer")
@@ -195,7 +221,9 @@ fn formatter<'a>(matches: &'a ArgMatches, default_name: &'a str, default_tag: &'
     Input {
         name: name,
         tag: tag,
-        command: command
+        command: command,
+        init_flag: matches.is_present("init"),
+        remove_flag: matches.is_present("remove")
     }
 }
 
@@ -205,7 +233,7 @@ fn bench_image() {
 
     println!("start bench");
 
-    let name = "alpine";
+    let name = "debian";
     let tag  = "latest";
     let home_dir = dirs::home_dir().unwrap();
     let home_dir_str = home_dir.to_str().unwrap();
