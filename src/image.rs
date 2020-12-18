@@ -8,7 +8,7 @@ extern crate serde_json;
 use serde::{Deserialize, Serialize};
 use flate2::read::GzDecoder;
 use tar::Archive;
-use std::io::{self, copy};
+use std::io::{self, copy, BufWriter, BufReader};
 use std::fs::File;
 
 #[derive(Serialize, Deserialize)]
@@ -100,12 +100,14 @@ impl Image<'_, '_> {
             .unwrap();
 
         let mut file = File::create(path).expect("file create");
+        let mut file = BufWriter::new(file);
         copy(&mut resp, &mut file).unwrap();
         Ok(())
     }
 
     pub fn extract(&self, path_src: &str, path_dist: &str) -> io::Result<()> {
         let tar_gz = File::open(path_src).expect("file open");
+        let tar_gz = BufReader::new(tar_gz);
         let tar = GzDecoder::new(tar_gz);
         let mut archive = Archive::new(tar);
         archive.unpack(path_dist)

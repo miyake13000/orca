@@ -192,19 +192,13 @@ fn formatter<'a>(matches: &'a ArgMatches, default_name: &'a str, default_tag: &'
     }
 }
 
-use std::time::Instant;
-//    use std::io::{self, Write};
-//    use std::fs::{self, File};
-//    use std::path::Path;
-//    use clap::{App, Arg, ArgMatches};
-//
-//    mod super::image;
-//
 #[test]
 fn bench_image() {
+
+    use std::time::Instant;
     println!("start bench");
 
-    let name = "alpine";
+    let name = "debian";
     let tag  = "latest";
     let home_dir = dirs::home_dir().unwrap();
     let home_dir_str = home_dir.to_str().unwrap();
