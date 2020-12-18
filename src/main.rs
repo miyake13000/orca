@@ -9,12 +9,12 @@ extern crate nix;
 extern crate libc;
 extern crate dirs;
 
-use nix::{sched, unistd, mount, sys};
 use std::ffi::{CStr, CString};
 use std::io::{self, Write};
 use std::fs::{self, File};
 use std::path::Path;
 use clap::{App, Arg, ArgMatches};
+use nix::{sched, unistd, mount, sys};
 
 mod image;
 
@@ -101,8 +101,8 @@ fn child(command: &str, path_rootfs: &str, dest_name: &str) -> isize {
 
     let command_cstring = CString::new(command).expect("CString::new");
     let command_cstr = CStr::from_bytes_with_nul(command_cstring
-                                              .to_bytes_with_nul())
-                                              .expect("CString to CStr");
+                                                 .to_bytes_with_nul())
+        .expect("CString to CStr");
     argv.push(command_cstr);
 
     let mut envp: Vec<&CStr> = Vec::new();
@@ -163,13 +163,13 @@ fn get_input() -> App<'static, 'static> {
              .long("name")
              .help("name of container image")
              .takes_value(true)
-        )
+            )
         .arg(Arg::with_name("tag")
              .short("t")
              .long("tag")
              .help("tag of container iamge")
              .takes_value(true)
-        )
+            )
         .arg(Arg::with_name("command")
              .help("command to execute in conainer")
             );
@@ -199,3 +199,45 @@ fn formatter<'a>(matches: &'a ArgMatches, default_name: &'a str, default_tag: &'
     }
 }
 
+#[test]
+fn bench_image() {
+    use std::time::Instant;
+
+    println!("start bench");
+
+    let name = "alpine";
+    let tag  = "latest";
+    let home_dir = dirs::home_dir().unwrap();
+    let home_dir_str = home_dir.to_str().unwrap();
+    let path = format!("{}/.local/orca/containers/{}/{}", home_dir_str, name, tag);
+    let path_image = format!("{}/image.tar.gz", path);
+    let path_rootfs = format!("{}/rootfs", path);
+    let image = image::Image::new(name, tag);
+
+    let start = Instant::now();
+
+    println!("start get_token");
+    let token = image.get_token().unwrap();
+    let res1 = start.elapsed().as_millis();
+    println!("end get_token {}ms", res1);
+
+    println!("start get_leyaer_id");
+    let layer_id = image.get_layer_id(&token).unwrap();
+    let res2 = start.elapsed().as_millis();
+    println!("end get_layer_id {}ms", res2 - res1);
+
+    fs::create_dir_all(&path).unwrap();
+
+    println!("start download");
+    image.download(&token, &layer_id, &path_image).unwrap();
+    let res3 = start.elapsed().as_millis();
+    println!("end download {}ms", res3- res2);
+
+    println!("start extract");
+    fs::create_dir_all(&path_rootfs).unwrap();
+    image.extract(&path_image, &path_rootfs).unwrap();
+    let res4 = start.elapsed().as_millis();
+    println!("end extract {}ms", res4 - res3);
+
+    println!("end bench");
+}
