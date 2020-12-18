@@ -239,5 +239,9 @@ fn bench_image() {
     let res4 = start.elapsed().as_millis();
     println!("end extract {}ms", res4 - res3);
 
+    fs::remove_file(path_image).unwrap();
+    fs::remove_dir_all(path_rootfs).unwrap();
+
     println!("end bench");
 }
+
