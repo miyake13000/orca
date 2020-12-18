@@ -42,7 +42,6 @@ fn main() {
     let path = format!("{}/.local/orca/containers/{}/{}", home_dir_str, input.name, input.tag);
     let path_image = format!("{}/image.tar.gz", path);
     let path_rootfs = format!("{}/rootfs", path);
-    let path_newroot = format!("{}/newroot", path);
     let image = image::Image::new(input.name, input.tag);
 
     // download container image if it doesnt exist
@@ -66,8 +65,7 @@ fn main() {
     // variable for child process
     const STACK_SIZE: usize = 1024 * 1024;
     let ref mut stack: [u8; STACK_SIZE] = [0; STACK_SIZE];
-    fs::create_dir_all(&path_newroot).unwrap();
-    let cb = Box::new(|| child(input.command, &path_rootfs, &path_newroot, image.dest_name));
+    let cb = Box::new(|| child(input.command, &path_rootfs, image.dest_name));
 
     // create child process
     let pid = clone(cb, stack).unwrap();
@@ -81,21 +79,23 @@ fn main() {
     sys::wait::wait().expect("wait");
 }
 
-fn child(command: &str, path_rootfs: &str, path_newroot: &str, dest_name: &str) -> isize {
+fn child(command: &str, path_rootfs: &str, dest_name: &str) -> isize {
 
-    mount(path_rootfs, path_newroot, "", mount::MsFlags::MS_BIND, "").unwrap();
-    unistd::chdir(path_newroot).expect("chdir");
-    fs::create_dir_all("oldroot").unwrap();
-    unistd::pivot_root(".", "oldroot").unwrap();
-    unistd::chroot(".").expect("chroot");
-    mount::umount("oldroot").expect("umount oldroot");
-    unistd::sethostname(dest_name).expect("sethostname");
+    let path_oldroot = format!("{}/oldroot", path_rootfs);
+    let path_oldroot = path_oldroot.as_str();
 
-
-    fs::create_dir_all("/proc").unwrap();
+    unistd::chdir(path_rootfs).expect("chdir");
+    mount(path_rootfs , path_rootfs, "", mount::MsFlags::MS_BIND, "").expect("mount bind");
+    fs::create_dir_all(path_oldroot).expect("create dir oldroot");
+    unistd::pivot_root(path_rootfs, path_oldroot).expect("pivot_root");
+    unistd::chdir("/").expect("chdir");
+    fs::create_dir_all("/proc").expect("crate dir proc");
     mount("proc", "/proc", "proc",mount::MsFlags::empty(), "").expect("mount proc");
-    fs::create_dir_all("/dev/pts").unwrap();
+    fs::create_dir_all("/dev/pts").expect("create dir devpts");
     mount("devpts", "/dev/pts", "devpts",mount::MsFlags::empty(), "").expect("mount devpts");
+    mount::umount2("/oldroot", mount::MntFlags::MNT_DETACH).expect("umount oldroot");
+    fs::remove_dir("/oldroot").expect("remove dir oldroot");
+    unistd::sethostname(dest_name).expect("sethostname");
 
     let mut argv: Vec<&CStr> = Vec::new();
 
