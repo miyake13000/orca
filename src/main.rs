@@ -25,6 +25,7 @@ struct Input<'a, 'b, 'c> {
     command: &'c str,
     init_flag: bool,
     remove_flag: bool,
+    no_netns_flag: bool,
 }
 
 fn main() {
@@ -80,7 +81,7 @@ fn main() {
     let cb = Box::new(|| child(input.command, &path_rootfs, image.dest_name));
 
     // create child process
-    let pid = clone(cb, stack).unwrap();
+    let pid = clone(cb, stack, input.no_netns_flag).unwrap();
 
     // map user's uid and gid to root in container
     let pid = pid.as_raw() as i32;
@@ -156,16 +157,17 @@ fn id_map(pid: i32, inner_id: u32, outer_id: u32, range: u32) -> io::Result<()> 
     Ok(())
 }
 
-
-fn clone(cb: sched::CloneCb, stack: &mut [u8]) -> nix::Result<unistd::Pid> {
+fn clone(cb: sched::CloneCb, stack: &mut [u8], no_netns: bool) -> nix::Result<unistd::Pid> {
 
     let mut flags = sched::CloneFlags::empty();
     flags.insert(sched::CloneFlags::CLONE_NEWUSER);
     flags.insert(sched::CloneFlags::CLONE_NEWUTS);
     flags.insert(sched::CloneFlags::CLONE_NEWIPC);
     flags.insert(sched::CloneFlags::CLONE_NEWPID);
-    flags.insert(sched::CloneFlags::CLONE_NEWNET);
     flags.insert(sched::CloneFlags::CLONE_NEWNS);
+    if !no_netns {
+        flags.insert(sched::CloneFlags::CLONE_NEWNET);
+    }
 
     let signal = Some(libc::SIGCHLD);
 
@@ -186,9 +188,9 @@ fn get_input() -> App<'static, 'static> {
         .author(crate_authors!())
         .about(crate_description!())
         .arg(Arg::with_name("name")
-             .short("n")
-             .long("name")
-             .help("name of container image")
+             .short("d")
+             .long("dest")
+             .help("destribution name of container image")
              .takes_value(true)
             )
         .arg(Arg::with_name("tag")
@@ -206,6 +208,11 @@ fn get_input() -> App<'static, 'static> {
              .short("r")
              .long("remove")
              .help("remove container environment after executing")
+            )
+        .arg(Arg::with_name("no_netns")
+             .short("n")
+             .long("no_netns")
+             .help("dont isolete network namespace")
             )
         .arg(Arg::with_name("command")
              .help("command to execute in conainer")
@@ -234,7 +241,8 @@ fn formatter<'a>(matches: &'a ArgMatches, default_name: &'a str, default_tag: &'
         tag: tag,
         command: command,
         init_flag: matches.is_present("init"),
-        remove_flag: matches.is_present("remove")
+        remove_flag: matches.is_present("remove"),
+        no_netns_flag: matches.is_present("no_netns")
     }
 }
 
