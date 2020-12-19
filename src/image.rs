@@ -105,7 +105,7 @@ impl Image<'_, '_> {
 
     pub fn extract(&self, path_src: &str, path_dest: &str) -> io::Result<()> {
         let _ = Command::new("tar")
-                         .arg("-xzf")
+                         .arg("-xzpf")
                          .arg(path_src)
                          .arg("-C")
                          .arg(path_dest)
