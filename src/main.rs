@@ -10,9 +10,10 @@ extern crate libc;
 extern crate dirs;
 
 use std::ffi::{CStr, CString};
-use std::io::{self, Write};
-use std::fs::{self, File};
+use std::io;
+use std::fs;
 use std::path::Path;
+use std::process::Command;
 use clap::{App, Arg, ArgMatches};
 use nix::{sched, unistd, mount, sys};
 
@@ -132,19 +133,29 @@ fn child(command: &str, path_rootfs: &str, dest_name: &str) -> isize {
     return 0;
 }
 
-fn id_map(pid: i32, innner_id: u32, outer_id: u32, lenge: u32) -> io::Result<usize> {
-    let path = format!("{}{}", "/proc/", pid.to_string());
-    let path_uid = format!("{}{}", path, "/uid_map");
-    let path_gid = format!("{}{}", path, "/gid_map");
-    let path_setg = format!("{}{}", path, "/setgroups");
-    let content = format!("{} {} {}", innner_id, outer_id, lenge);
-    let mut file_uid = File::create(path_uid).unwrap();
-    let mut file_gid = File::create(path_gid).unwrap();
-    let mut file_setg = File::create(path_setg).unwrap();
-    file_uid.write(content.as_bytes()).expect("write uid");
-    file_setg.write(b"deny").expect("write setg");
-    file_gid.write(content.as_bytes())
+fn id_map(pid: i32, inner_id: u32, outer_id: u32, range: u32) -> io::Result<()> {
+    let lowest_subid = (outer_id - 1000) * 65536 + 100000;
+    let args: Vec<String> = vec![pid.to_string(),
+                                 inner_id.to_string(),
+                                 outer_id.to_string(),
+                                 range.to_string(),
+                                 "1".to_string(),
+                                 lowest_subid.to_string(),
+                                 "65536".to_string()
+                                ];
+    let _ = Command::new("newuidmap")
+        .args(&args)
+        .output()
+        .expect("id_map");
+
+    let _ = Command::new("newgidmap")
+        .args(&args)
+        .output()
+        .expect("id_map");
+
+    Ok(())
 }
+
 
 fn clone(cb: sched::CloneCb, stack: &mut [u8]) -> nix::Result<unistd::Pid> {
 
