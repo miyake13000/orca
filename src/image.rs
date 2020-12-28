@@ -1,9 +1,9 @@
 // This file has below struct and impl
 // ・Image : operate container image
 
-extern crate reqwest;
 extern crate serde;
 extern crate serde_json;
+extern crate ureq;
 
 use serde::{Deserialize, Serialize};
 use std::io::{self, copy};
@@ -51,11 +51,9 @@ impl Image<'_, '_> {
 
     pub fn get_token(&self) -> io::Result<String> {
         let url = format!("https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/{}:pull", self.dest_name);
-        let client = reqwest::blocking::Client::new();
-        let resp = client.get(&url)
-            .send()
-            .unwrap()
-            .text()
+        let resp: String = ureq::get(&url)
+            .call()
+            .into_string()
             .unwrap();
         let res_json: Res1 = serde_json::from_str(&resp).unwrap();
         Ok(res_json.token)
@@ -63,54 +61,39 @@ impl Image<'_, '_> {
 
     pub fn get_layer_id(&self, token: &str) -> io::Result<String> {
         let url = format!("https://registry-1.docker.io/v2/library/{}/manifests/{}", self.dest_name, self.dest_tag);
-        let client = reqwest::blocking::Client::new();
-        let resp = client.get(&url)
-            .header(reqwest::header::ACCEPT, "application/vnd.docker.distribution.manifest.v2+json")
-            .bearer_auth(token)
-            .send()
-            .unwrap()
-            .text()
+        let token_str = format!("Bearer {}", token);
+        let resp: String = ureq::get(&url)
+            .set("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+            .set("Authorization", &token_str)
+            .call()
+            .into_string()
             .unwrap();
         let res_json: Res2 = serde_json::from_str(&resp).unwrap();
         Ok((&res_json.layers[0].digest).to_string())
     }
 
-    #[allow(dead_code)]
-    pub fn get_var(&self, token: &str, image_id: &str) -> io::Result<(String, String)> {
-        let url = format!("https://registry-1.docker.io/v2/library/{}/blobs/{}", self.dest_name, image_id);
-
-        let client = reqwest::blocking::Client::new();
-        let resp = client.get(&url)
-            .bearer_auth(token)
-            .send()
-            .unwrap()
-            .text()
-            .unwrap();
-        let _res_json: Res2 = serde_json::from_str(&resp).unwrap();
-        Ok((String::from(""), String::from("")))
-    }
-
     pub fn download(&self, token: &str, layer_id: &str, path: &str) -> io::Result<()> {
         let url = format!("https://registry-1.docker.io/v2/library/{}/blobs/{}", self.dest_name, layer_id);
-        let client = reqwest::blocking::Client::new();
-        let mut resp = client.get(&url)
-            .bearer_auth(token)
-            .send()
-            .unwrap();
-
-        let mut file = File::create(path).expect("file create");
-        copy(&mut resp, &mut file).unwrap();
+        let token_str = format!("Bearer {}", token);
+        let resp = ureq::get(&url)
+            .set("Authorization", &token_str)
+            .call()
+            .into_reader();
+        let file = File::create(path).expect("file create");
+        let mut reader = std::io::BufReader::new(resp);
+        let mut writer = std::io::BufWriter::new(file);
+        copy(&mut reader, &mut writer).unwrap();
         Ok(())
     }
 
     pub fn extract(&self, path_src: &str, path_dest: &str) -> io::Result<()> {
         let _ = Command::new("tar")
-                         .arg("-xzpf")
-                         .arg(path_src)
-                         .arg("-C")
-                         .arg(path_dest)
-                         .output()
-                         .expect("exec tar");
+            .arg("-xzpf")
+            .arg(path_src)
+            .arg("-C")
+            .arg(path_dest)
+            .output()
+            .expect("exec tar");
         Ok(())
     }
 }
