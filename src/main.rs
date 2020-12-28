@@ -5,7 +5,6 @@
 
 #[macro_use]
 extern crate clap;
-extern crate nix;
 extern crate libc;
 extern crate dirs;
 
@@ -15,9 +14,9 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use clap::{App, Arg, ArgMatches};
-use nix::{sched, unistd, mount, sys};
 
 mod image;
+mod syscall;
 
 struct Input<'a, 'b, 'c> {
     name: &'a str,
@@ -81,15 +80,21 @@ fn main() {
     let cb = Box::new(|| child(input.command, &path_rootfs, image.dest_name));
 
     // create child process
-    let pid = clone(cb, stack, input.no_netns_flag).unwrap();
+    let pid = syscall::clone(cb,
+                             stack,
+                             true,
+                             true,
+                             true,
+                             true,
+                             true,
+                             input.no_netns_flag,
+                             ).unwrap();
 
     // map user's uid and gid to root in container
-    let pid = pid.as_raw() as i32;
-    let uid = unistd::getuid().as_raw() as u32;
-    id_map(pid, 0, uid, 1).expect("set_uid");
+    id_map(pid, 0, 1000, 1).expect("set_uid");
 
     // wait for child process exiting
-    sys::wait::wait().expect("wait");
+    syscall::wait().unwrap();
 
     // terminating process for caontainer image
     if input.remove_flag {
@@ -102,18 +107,22 @@ fn child(command: &str, path_rootfs: &str, dest_name: &str) -> isize {
     let path_oldroot = format!("{}/oldroot", path_rootfs);
     let path_oldroot = path_oldroot.as_str();
 
-    unistd::chdir(path_rootfs).expect("chdir");
-    mount(path_rootfs , path_rootfs, "", mount::MsFlags::MS_BIND, "").expect("mount bind");
-    fs::create_dir_all(path_oldroot).expect("create dir oldroot");
-    unistd::pivot_root(path_rootfs, path_oldroot).expect("pivot_root");
-    unistd::chdir("/").expect("chdir");
-    fs::create_dir_all("/proc").expect("crate dir proc");
-    mount("proc", "/proc", "proc",mount::MsFlags::empty(), "").expect("mount proc");
+    syscall::chdir(path_rootfs).unwrap();
+    syscall::mount(path_rootfs, path_rootfs, "", true).unwrap();
+    fs::create_dir_all(path_oldroot).unwrap();
+    syscall::pivot_root(path_rootfs, path_oldroot).unwrap();
+    syscall::chdir("/").unwrap();
+    fs::create_dir_all("/proc").unwrap();
+    syscall::mount("proc", "/proc", "proc", false).unwrap();
     fs::create_dir_all("/dev/pts").expect("create dir devpts");
-    mount("devpts", "/dev/pts", "devpts",mount::MsFlags::empty(), "").expect("mount devpts");
-    mount::umount2("/oldroot", mount::MntFlags::MNT_DETACH).expect("umount oldroot");
-    fs::remove_dir("/oldroot").expect("remove dir oldroot");
-    unistd::sethostname(dest_name).expect("sethostname");
+    syscall::mount("devpts", "/dev/pts", "devpts", false).unwrap();
+
+    fs::create_dir_all("/home/miyake").unwrap();
+    syscall::mount("/home/miyake", "/home/miyake", "", true).unwrap();
+
+    syscall::umount("/oldroot", true).unwrap();
+    fs::remove_dir("/oldroot").unwrap();
+    syscall::sethostname(dest_name).unwrap();
 
     let mut argv: Vec<&CStr> = Vec::new();
 
@@ -129,7 +138,7 @@ fn child(command: &str, path_rootfs: &str, dest_name: &str) -> isize {
     envp.push(CStr::from_bytes_with_nul(b"TERM=xterm\0").unwrap());
     envp.push(CStr::from_bytes_with_nul(b"PATH=/bin:/usr/bin:/sbin:/usr/sbin\0").unwrap());
 
-    unistd::execvpe(command_cstr, &argv, &envp).expect("execvpe");
+    syscall::execvpe(command_cstr, &argv, &envp).unwrap();
 
     return 0;
 }
@@ -155,31 +164,6 @@ fn id_map(pid: i32, inner_id: u32, outer_id: u32, range: u32) -> io::Result<()> 
         .expect("id_map");
 
     Ok(())
-}
-
-fn clone(cb: sched::CloneCb, stack: &mut [u8], no_netns: bool) -> nix::Result<unistd::Pid> {
-
-    let mut flags = sched::CloneFlags::empty();
-    flags.insert(sched::CloneFlags::CLONE_NEWUSER);
-    flags.insert(sched::CloneFlags::CLONE_NEWUTS);
-    flags.insert(sched::CloneFlags::CLONE_NEWIPC);
-    flags.insert(sched::CloneFlags::CLONE_NEWPID);
-    flags.insert(sched::CloneFlags::CLONE_NEWNS);
-    if !no_netns {
-        flags.insert(sched::CloneFlags::CLONE_NEWNET);
-    }
-
-    let signal = Some(libc::SIGCHLD);
-
-    sched::clone(cb, stack, flags, signal)
-}
-
-fn mount(src: &str, trg: &str, fstyp: &str, flag: mount::MsFlags, data: &str) -> nix::Result<()> {
-    mount::mount(Some(src),
-    trg,
-    Some(fstyp),
-    flag,
-    Some(data))
 }
 
 fn get_input() -> App<'static, 'static> {
