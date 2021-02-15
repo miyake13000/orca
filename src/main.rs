@@ -117,9 +117,6 @@ fn child(command: &str, path_rootfs: &str, dest_name: &str) -> isize {
     fs::create_dir_all("/dev/pts").expect("create dir devpts");
     syscall::mount("devpts", "/dev/pts", "devpts", false).unwrap();
 
-    fs::create_dir_all("/home/miyake").unwrap();
-    syscall::mount("/home/miyake", "/home/miyake", "", true).unwrap();
-
     syscall::umount("/oldroot", true).unwrap();
     fs::remove_dir("/oldroot").unwrap();
     syscall::sethostname(dest_name).unwrap();
