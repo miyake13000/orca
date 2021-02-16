@@ -5,12 +5,13 @@ Lightweight container management tool
 
 ## Prerequisities
 ### Debian
-- Execute below command
+- Execute below command  
 `$ sudo sysctl -w kernel.unprivileged_userns_clone=1`
 
 ## Install orca
-### Linux (Debian or Ubuntu)
-1. `$ sudo apt install git curl uidmap`
+### Linux
+#### Debian or Ubuntu
+1. `$ sudo apt install curl uidmap`
 2. `$ curl -L https://github.com/miyake13000/orca/releases/download/0.1/orca > orca`
 3. `$ chmod +x ./orca`
 
