@@ -1,11 +1,11 @@
 # orca
 
 ## Summury
-Lightweight container management tool
+Lightweight rootless container management tool
 
 ## Prerequisities
 ### Debian
-- Execute below command  
+Execute below command to be able to separate user_namespace by non-root user  
 `$ sudo sysctl -w kernel.unprivileged_userns_clone=1`
 
 ## Install orca
@@ -20,4 +20,13 @@ Lightweight container management tool
 
 ## Uninstall
 1. `$ rm ./orca`
-2. `$ rm -rf $HOME/.local/orca`
+2. `$ rm -rf $HOME/.local/orca`  
+
+## Build static linked binary
+You must build static linked openssl before build static linked binary.  
+Execute below command once.
+1. `$ sudo apt install musl-tools gcc openssl`
+2. `$ sudo bash build_static_openssl.sh`
+
+Execute below command to build static linked binary.
+1. `$ bash create_static_binary.sh`
