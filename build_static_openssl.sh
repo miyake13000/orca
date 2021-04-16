@@ -17,3 +17,6 @@ CC="musl-gcc -fPIE -pie" ./Configure no-shared no-async --prefix=/musl --openssl
 make depend
 make -j$(nproc)
 make install
+
+rm OpenSSL_1_1_1f.tar.gz
+rm -r openssl-OpenSSL_1_1_1f
