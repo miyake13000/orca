@@ -14,6 +14,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use clap::{App, Arg, ArgMatches};
+use orca::Exit;
 
 mod image;
 mod syscall;
@@ -52,25 +53,25 @@ fn main() {
     if !Path::new(&path_image).exists() {
         println!("Cannot find container image on local");
         println!("Serching...");
-        let token = image.get_token().unwrap();
+        let token = image.get_token().or_exit("Container image not found");
         println!("Downloading...");
-        let layer_id = image.get_layer_id(&token).unwrap();
-        fs::create_dir_all(&path).unwrap();
-        image.download(&token, &layer_id, &path_image).unwrap();
+        let layer_id = image.get_layer_id(&token).or_exit("Failed to get container ID");
+        fs::create_dir_all(&path).or_exit("Failed to create container dir");
+        image.download(&token, &layer_id, &path_image).or_exit("Failed to download container image");
     }
 
     // extract container image if it doesnt exist
     if !Path::new(&path_rootfs).exists() {
         println!("Extracting...");
-        fs::create_dir_all(&path_rootfs).unwrap();
-        image.extract(&path_image, &path_rootfs).unwrap();
+        fs::create_dir_all(&path_rootfs).or_exit("Fialed to create rootfs dir");
+        image.extract(&path_image, &path_rootfs).or_exit("Failed to extract container image");
     } else {
         // init setting for container image
         if input.init_flag {
-            fs::remove_dir_all(&path_rootfs).unwrap();
+            fs::remove_dir_all(&path_rootfs).or_exit("Failed to remove container image");
             println!("Extracting...");
-            fs::create_dir_all(&path_rootfs).unwrap();
-            image.extract(&path_image, &path_rootfs).unwrap();
+            fs::create_dir_all(&path_rootfs).or_exit("Failed to create rootfs dir");
+            image.extract(&path_image, &path_rootfs).or_exit("Failed to extract container image");
         }
     }
 
@@ -88,17 +89,17 @@ fn main() {
                              true,
                              true,
                              input.no_netns_flag,
-                             ).unwrap();
+                             ).or_exit("Failed to clone process and separate namespace");
 
     // map user's uid and gid to root in container
     id_map(pid, 0, 1000, 1).expect("set_uid");
 
     // wait for child process exiting
-    syscall::wait().unwrap();
+    syscall::wait().or_exit("Falied to wait child process");
 
     // terminating process for caontainer image
     if input.remove_flag {
-        fs::remove_dir_all(&path_rootfs).unwrap();
+        fs::remove_dir_all(&path_rootfs).or_exit("Failed to remove container image");
     }
 }
 
@@ -107,19 +108,18 @@ fn child(command: &str, path_rootfs: &str, dest_name: &str) -> isize {
     let path_oldroot = format!("{}/oldroot", path_rootfs);
     let path_oldroot = path_oldroot.as_str();
 
-    syscall::chdir(path_rootfs).unwrap();
-    syscall::mount(path_rootfs, path_rootfs, "", true).unwrap();
-    fs::create_dir_all(path_oldroot).unwrap();
-    syscall::pivot_root(path_rootfs, path_oldroot).unwrap();
-    syscall::chdir("/").unwrap();
-    fs::create_dir_all("/proc").unwrap();
-    syscall::mount("proc", "/proc", "proc", false).unwrap();
-    fs::create_dir_all("/dev/pts").expect("create dir devpts");
-    syscall::mount("devpts", "/dev/pts", "devpts", false).unwrap();
-
-    syscall::umount("/oldroot", true).unwrap();
-    fs::remove_dir("/oldroot").unwrap();
-    syscall::sethostname(dest_name).unwrap();
+    syscall::chdir(path_rootfs).or_exit("Failed to chdir");
+    syscall::mount(path_rootfs, path_rootfs, "", true).or_exit("Failed to mount");
+    fs::create_dir_all(path_oldroot).or_exit("Failed to create oldroot");
+    syscall::pivot_root(path_rootfs, path_oldroot).or_exit("Failed to pivot_root");
+    syscall::chdir("/").or_exit("Failed to chdir");
+    fs::create_dir_all("/proc").or_exit("Failed to create proc dir");
+    syscall::mount("proc", "/proc", "proc", false).or_exit("Faield to mount proc filesystem");
+    fs::create_dir_all("/dev/pts").or_exit("Failed to create /dev/pts");
+    syscall::mount("devpts", "/dev/pts", "devpts", false).or_exit("Failed to mount devpts filesystem");
+    syscall::umount("/oldroot", true).or_exit("Failed to unmount");
+    fs::remove_dir("/oldroot").or_exit("Failed to remove /oldroot");
+    syscall::sethostname(dest_name).or_exit("Faield to set hostname");
 
     let mut argv: Vec<&CStr> = Vec::new();
 
@@ -135,7 +135,7 @@ fn child(command: &str, path_rootfs: &str, dest_name: &str) -> isize {
     envp.push(CStr::from_bytes_with_nul(b"TERM=xterm\0").unwrap());
     envp.push(CStr::from_bytes_with_nul(b"PATH=/bin:/usr/bin:/sbin:/usr/sbin\0").unwrap());
 
-    syscall::execvpe(command_cstr, &argv, &envp).unwrap();
+    syscall::execvpe(command_cstr, &argv, &envp).or_exit("Command not found");
 
     return 0;
 }
