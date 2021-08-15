@@ -1,13 +1,7 @@
-// This file has below struct and impl
-// ・Image : operate container image
-
-extern crate reqwest;
-extern crate serde;
-extern crate serde_json;
-
 use serde::{Deserialize, Serialize};
-use std::io::{self, copy};
-use std::fs::File;
+use std::io::copy;
+use std::fs::{self, File};
+use std::path::Path;
 use std::process::Command;
 
 #[derive(Serialize, Deserialize)]
@@ -36,21 +30,61 @@ struct Res2 {
     layers: Vec<Config>,
 }
 
-pub struct Image<'a, 'b> {
-    pub dest_name: &'a str,
-    pub dest_tag:  &'b str,
+pub struct Image {
+    tarball_path: String,
+    pub rootfs_path: String,
+    pub image_name: String,
+    pub image_tag:  String,
 }
 
-impl Image<'_, '_> {
-    pub fn new<'a>(name: &'a str, tag: &'a str) -> Image<'a, 'a> {
+impl Image {
+    pub fn new(root_path: String, image_name: String, image_tag: String) -> Self {
+        let tarball_path = format!("{}/image.tar.gz", &root_path);
+        let rootfs_path = format!("{}/rootfs", &root_path);
+        fs::create_dir_all(&root_path).unwrap();
         Image{
-            dest_name: name,
-            dest_tag: tag,
+            tarball_path,
+            rootfs_path,
+            image_name,
+            image_tag
         }
     }
 
-    pub fn get_token(&self) -> io::Result<String> {
-        let url = format!("https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/{}:pull", self.dest_name);
+    pub fn exist(&self) -> bool {
+        Path::new(&self.rootfs_path).exists()
+    }
+
+    pub fn download(&self) -> std::result::Result<(), ()> {
+        let token = Self::get_token(&self.image_name).unwrap();
+        let layer_id = Self::get_layer_id(&self.image_name, &self.image_tag, &token).unwrap();
+        Self::download_layer_tarball(
+            &self.image_name,
+            &token,
+            &layer_id,
+            &self.tarball_path
+        ).unwrap();
+        Ok(())
+    }
+
+    pub fn extract(&self) -> std::result::Result<(), ()> {
+        fs::create_dir_all(&self.rootfs_path).unwrap();
+        let _ = Command::new("tar")
+            .arg("-xzpf")
+            .arg(&self.tarball_path)
+            .arg("-C")
+            .arg(&self.rootfs_path)
+            .output()
+            .expect("exec tar");
+        Ok(())
+    }
+
+    pub fn remove(&self) -> std::result::Result<(), ()> {
+        fs::remove_dir_all(&self.rootfs_path).unwrap();
+        Ok(())
+    }
+
+    fn get_token(image_name: &str) -> std::result::Result<String, ()> {
+        let url = format!("https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/{}:pull", image_name);
         let client = reqwest::blocking::Client::new();
         let resp = client.get(&url)
             .send()
@@ -61,8 +95,17 @@ impl Image<'_, '_> {
         Ok(res_json.token)
     }
 
-    pub fn get_layer_id(&self, token: &str) -> io::Result<String> {
-        let url = format!("https://registry-1.docker.io/v2/library/{}/manifests/{}", self.dest_name, self.dest_tag);
+    fn get_layer_id(
+        image_name: &str,
+        image_tag: &str,
+        token: &str
+    ) -> std::result::Result<String, ()> {
+
+        let url = format!(
+            "https://registry-1.docker.io/v2/library/{}/manifests/{}",
+            image_name,
+            image_tag
+        );
         let client = reqwest::blocking::Client::new();
         let resp = client.get(&url)
             .header(reqwest::header::ACCEPT, "application/vnd.docker.distribution.manifest.v2+json")
@@ -72,12 +115,21 @@ impl Image<'_, '_> {
             .text()
             .unwrap();
         let res_json: Res2 = serde_json::from_str(&resp).unwrap();
-        Ok((&res_json.layers[0].digest).to_string())
+        Ok(res_json.layers[0].digest.to_string())
     }
 
     #[allow(dead_code)]
-    pub fn get_var(&self, token: &str, image_id: &str) -> io::Result<(String, String)> {
-        let url = format!("https://registry-1.docker.io/v2/library/{}/blobs/{}", self.dest_name, image_id);
+    fn get_var(
+        token: &str,
+        image_name: &str,
+        image_id: &str
+    ) -> std::result::Result<(String, String), ()> {
+
+        let url = format!(
+            "https://registry-1.docker.io/v2/library/{}/blobs/{}",
+            image_name,
+            image_id
+        );
 
         let client = reqwest::blocking::Client::new();
         let resp = client.get(&url)
@@ -90,27 +142,21 @@ impl Image<'_, '_> {
         Ok((String::from(""), String::from("")))
     }
 
-    pub fn download(&self, token: &str, layer_id: &str, path: &str) -> io::Result<()> {
-        let url = format!("https://registry-1.docker.io/v2/library/{}/blobs/{}", self.dest_name, layer_id);
+    fn download_layer_tarball(
+        image_name: &str,
+        token: &str,
+        layer_id: &str,
+        file_path: &str
+    ) -> std::result::Result<(), ()> {
+        let url = format!("https://registry-1.docker.io/v2/library/{}/blobs/{}", image_name, layer_id);
         let client = reqwest::blocking::Client::new();
         let mut resp = client.get(&url)
             .bearer_auth(token)
             .send()
             .unwrap();
 
-        let mut file = File::create(path).expect("file create");
+        let mut file = File::create(file_path).unwrap();
         copy(&mut resp, &mut file).unwrap();
-        Ok(())
-    }
-
-    pub fn extract(&self, path_src: &str, path_dest: &str) -> io::Result<()> {
-        let _ = Command::new("tar")
-                         .arg("-xzpf")
-                         .arg(path_src)
-                         .arg("-C")
-                         .arg(path_dest)
-                         .output()
-                         .expect("exec tar");
         Ok(())
     }
 }

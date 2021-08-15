@@ -1,15 +1,13 @@
-pub trait Exit<T, E> {
-    fn or_exit(self, mesg: &str) -> T;
-}
+#[macro_use]
+extern crate clap;
+extern crate nix;
+extern crate reqwest;
+extern crate serde;
+extern crate serde_json;
+extern crate dirs;
 
-impl<T, E> Exit<T, E> for std::result::Result<T, ()> {
-    fn or_exit(self, mesg: &str)  -> T {
-        match self {
-            Ok(res) => res,
-            Err(_) => {
-                eprintln!("{}", mesg);
-                std::process::exit(1);
-            }
-        }
-    }
-}
+pub mod args;
+pub mod container;
+pub mod image;
+
+const STACK_SIZE: usize = 1024*1024;
