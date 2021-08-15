@@ -79,7 +79,11 @@ impl Image {
     }
 
     pub fn remove(&self) -> std::result::Result<(), ()> {
-        fs::remove_dir_all(&self.rootfs_path).unwrap();
+        let _ = Command::new("rm")
+            .arg("-rf")
+            .arg(&self.rootfs_path)
+            .output()
+            .unwrap();
         Ok(())
     }
 
