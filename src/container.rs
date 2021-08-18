@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io::{stdout, stdin};
 use std::process::Command;
 use std::os::unix::io::AsRawFd;
-use nix::unistd::Pid;
+use nix::unistd::{Pid, geteuid};
 use nix::sys::wait::wait;
 use nix::sched::{clone, CloneFlags, setns};
 use libc::{grantpt, unlockpt};
@@ -133,6 +133,14 @@ impl Container {
     }
 
     fn child_main(command: &str, path_rootfs: &str, image_name: &str) -> isize {
+
+        retry(Fixed::from_millis(10).take(100), || {
+            let uid = geteuid().as_raw() as u32;
+            match uid {
+                0 => Ok(()),
+                _ => Err(())
+            }
+        }).unwrap();
 
         let child = Child::new(path_rootfs.to_string());
         child.pivot_root().unwrap();
