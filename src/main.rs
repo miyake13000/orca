@@ -4,6 +4,7 @@
 use orca::args::Args;
 use orca::image::Image;
 use orca::container::Container;
+use orca::terminal::Terminal;
 use dirs::home_dir;
 
 fn main() {
@@ -57,6 +58,10 @@ fn main() {
         args.netns_flag
     );
     working_container.map_id(true).unwrap();
+    working_container.connect_tty().unwrap();
+
+    let mut terminal = Terminal::new();
+    terminal.into_raw_mode().unwrap();
 
     let used_image = working_container.wait().unwrap();
 

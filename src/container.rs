@@ -2,14 +2,20 @@ mod child;
 mod id;
 
 use std::ffi::{CString, CStr};
+use std::thread;
+use std::fs::File;
+use std::io::{stdout, stdin};
 use std::process::Command;
+use std::os::unix::io::AsRawFd;
 use nix::unistd::Pid;
 use nix::sys::wait::wait;
-use nix::sched::{clone, CloneFlags};
+use nix::sched::{clone, CloneFlags, setns};
+use libc::{grantpt, unlockpt};
 use child::Child;
 use id::{MappingId, IdType};
 use crate::image::Image;
 use crate::STACK_SIZE;
+use retry::{retry, delay::Fixed};
 
 pub struct Container {
     image: Image,
@@ -74,6 +80,53 @@ impl Container {
         Ok(())
     }
 
+    pub fn connect_tty(&self) -> std::result::Result<(), ()> {
+        Self::setns(self.child_pid).unwrap();
+
+        let pty_master = retry(Fixed::from_millis(10).take(100), || {
+            nix::fcntl::open(
+                "/dev/pts/ptmx",
+                nix::fcntl::OFlag::O_RDWR,
+                nix::sys::stat::Mode::all()
+            )
+        }).unwrap();
+
+        if unsafe{ grantpt(pty_master) } < 0 {
+            return Err(())
+        }
+        if unsafe{ unlockpt(pty_master) } < 0 {
+            return Err(())
+        }
+
+        thread::spawn(move || {
+            let stdout = stdout().as_raw_fd();
+            let mut s: [u8; 1] = [0; 1];
+            loop {
+                if let Err(_) = nix::unistd::read(pty_master, &mut s) {
+                    return;
+                }
+                if let Err(_) = nix::unistd::write(stdout, &s) {
+                    return;
+                }
+            }
+        });
+
+        thread::spawn(move || {
+            let stdin = stdin().as_raw_fd();
+            let mut s: [u8; 1] = [0; 1];
+            loop {
+                if let Err(_) = nix::unistd::read(stdin, &mut s) {
+                    return;
+                }
+                if let Err(_) = nix::unistd::write(pty_master, &s) {
+                    return;
+                }
+            }
+        });
+
+        Ok(())
+    }
+
     pub fn wait(self) -> std::result::Result<Image, ()> {
         let _ = wait().unwrap();
         Ok(self.image)
@@ -85,6 +138,7 @@ impl Container {
         child.pivot_root().unwrap();
         child.mount().unwrap();
         child.sethostname(image_name).unwrap();
+        child.connect_tty().unwrap();
 
         let command_cstring = CString::new(command).unwrap();
         let command_cstr = command_cstring.as_c_str();
@@ -101,5 +155,20 @@ impl Container {
         child.exec(command_cstr, &argv, &envp);
 
         return 0; // Unreachable but neccessary for clone
+    }
+
+    fn setns(child_pid: Pid) -> std::result::Result<(), ()> {
+        let raw_child_pid = child_pid.as_raw() as isize;
+        let userns_filename = format!("/proc/{}/ns/user", raw_child_pid);
+        let mntns_filename = format!("/proc/{}/ns/mnt", raw_child_pid);
+        let userns = File::open(&userns_filename).unwrap();
+        let mntns = File::open(&mntns_filename).unwrap();
+        let userns_fd = userns.as_raw_fd();
+        let mntns_fd = mntns.as_raw_fd();
+
+        setns(userns_fd, CloneFlags::CLONE_NEWUSER).unwrap();
+        setns(mntns_fd, CloneFlags::CLONE_NEWNS).unwrap();
+
+        Ok(())
     }
 }
