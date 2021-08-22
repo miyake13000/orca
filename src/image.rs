@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::io::copy;
+use std::io::{copy, BufReader};
 use std::fs::{self, File};
 use std::path::Path;
 use std::process::Command;
+use tar::Archive;
+use flate2::bufread::MultiGzDecoder;
 
 #[derive(Serialize, Deserialize)]
 #[allow(non_snake_case)]
@@ -68,13 +70,12 @@ impl Image {
 
     pub fn extract(&self) -> std::result::Result<(), ()> {
         fs::create_dir_all(&self.rootfs_path).unwrap();
-        let _ = Command::new("tar")
-            .arg("-xzpf")
-            .arg(&self.tarball_path)
-            .arg("-C")
-            .arg(&self.rootfs_path)
-            .output()
-            .expect("exec tar");
+        let tar_gz = File::open(&self.tarball_path).unwrap();
+        let reader = BufReader::new(tar_gz);
+        let tar = MultiGzDecoder::new(reader);
+        let mut archive = Archive::new(tar);
+        archive.unpack(&self.rootfs_path).unwrap();
+
         Ok(())
     }
 
