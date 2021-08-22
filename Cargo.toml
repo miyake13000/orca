@@ -1,6 +1,6 @@
 [package]
 name = "orca"
-version = "0.1.1"
+version = "0.2"
 authors = ["miyake13000 <https://github.com/miyake13000/orca>"]
 edition = "2018"
 description = "Container Runtime written by Rust"
