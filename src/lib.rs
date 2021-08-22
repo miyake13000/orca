@@ -12,5 +12,6 @@ pub mod args;
 pub mod container;
 pub mod image;
 pub mod terminal;
+pub mod mount;
 
 const STACK_SIZE: usize = 1024*1024;

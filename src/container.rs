@@ -83,7 +83,7 @@ impl Container {
     pub fn connect_tty(&self) -> std::result::Result<(), ()> {
         Self::setns(self.child_pid).unwrap();
 
-        let pty_master = retry(Fixed::from_millis(10).take(100), || {
+        let pty_master = retry(Fixed::from_millis(50).take(20), || {
             nix::fcntl::open(
                 "/dev/pts/ptmx",
                 nix::fcntl::OFlag::O_RDWR,
@@ -134,7 +134,7 @@ impl Container {
 
     fn child_main(command: &str, path_rootfs: &str, image_name: &str) -> isize {
 
-        retry(Fixed::from_millis(10).take(100), || {
+        retry(Fixed::from_millis(50).take(20), || {
             let uid = geteuid().as_raw() as u32;
             match uid {
                 0 => Ok(()),
@@ -144,7 +144,7 @@ impl Container {
 
         let child = Child::new(path_rootfs.to_string());
         child.pivot_root().unwrap();
-        child.mount().unwrap();
+        child.mount_all().unwrap();
         child.sethostname(image_name).unwrap();
         child.connect_tty().unwrap();
 
