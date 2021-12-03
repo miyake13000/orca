@@ -1,21 +1,21 @@
 mod child;
 mod id;
 
-use std::ffi::{CString, CStr};
-use std::thread;
-use std::fs::{File, OpenOptions};
-use std::io::{stdout, stdin, Write};
 use crate::command::Command;
-use std::os::unix::io::AsRawFd;
-use nix::unistd::{Pid, geteuid};
-use nix::sys::wait::wait;
-use nix::sched::{clone, CloneFlags, setns};
-use libc::{grantpt, unlockpt};
-use child::Child;
-use id::{MappingId, IdType};
 use crate::image::Image;
 use crate::STACK_SIZE;
-use retry::{retry, delay::Fixed};
+use child::Child;
+use id::{IdType, MappingId};
+use libc::{grantpt, unlockpt};
+use nix::sched::{clone, setns, CloneFlags};
+use nix::sys::wait::wait;
+use nix::unistd::{geteuid, Pid};
+use retry::{delay::Fixed, retry};
+use std::ffi::{CStr, CString};
+use std::fs::{File, OpenOptions};
+use std::io::{stdin, stdout, Write};
+use std::os::unix::io::AsRawFd;
+use std::thread;
 
 pub struct Container {
     image: Image,
@@ -23,12 +23,7 @@ pub struct Container {
 }
 
 impl Container {
-    pub fn new(
-        image: Image,
-        command: String,
-        netns_flag: bool
-    ) -> Self {
-
+    pub fn new(image: Image, command: String, netns_flag: bool) -> Self {
         let ref mut stack: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
         let cb = Box::new(|| Self::child_main(&command, &image.rootfs_path, &image.image_name));
@@ -46,10 +41,7 @@ impl Container {
 
         let child_pid = clone(cb, stack, flags, signals).unwrap();
 
-        Container{
-            image,
-            child_pid
-        }
+        Container { image, child_pid }
     }
 
     pub fn map_id(&self) -> std::result::Result<(), ()> {
@@ -61,17 +53,23 @@ impl Container {
         let setgroups_path = format!("/proc/{}/setgroups", self.child_pid);
 
         let mut uid_map_file = OpenOptions::new().append(true).open(&uid_map_path).unwrap();
-        uid_map_file.write_all(&mapping_uid.to_string().into_bytes()).unwrap();
-        let mut setgroups_file = OpenOptions::new().append(true).open(&setgroups_path).unwrap();
+        uid_map_file
+            .write_all(&mapping_uid.to_string().into_bytes())
+            .unwrap();
+        let mut setgroups_file = OpenOptions::new()
+            .append(true)
+            .open(&setgroups_path)
+            .unwrap();
         setgroups_file.write_all(b"deny").unwrap();
         let mut gid_map_file = OpenOptions::new().append(true).open(&gid_map_path).unwrap();
-        gid_map_file.write_all(&mapping_gid.to_string().into_bytes()).unwrap();
+        gid_map_file
+            .write_all(&mapping_gid.to_string().into_bytes())
+            .unwrap();
 
         Ok(())
     }
 
     pub fn map_id_with_subuid(&self) -> std::result::Result<(), ()> {
-
         let mut args_uidmap: Vec<String> = vec![self.child_pid.to_string()];
         let mut args_gidmap: Vec<String> = vec![self.child_pid.to_string()];
 
@@ -85,8 +83,12 @@ impl Container {
         let _ = args_uidmap.append(&mut mapping_subuid.into_vec());
         let _ = args_gidmap.append(&mut mapping_subgid.into_vec());
 
-        Command::new("newuidmap", Some(args_uidmap)).execute().unwrap();
-        Command::new("newgidmap", Some(args_gidmap)).execute().unwrap();
+        Command::new("newuidmap", Some(args_uidmap))
+            .execute()
+            .unwrap();
+        Command::new("newgidmap", Some(args_gidmap))
+            .execute()
+            .unwrap();
 
         Ok(())
     }
@@ -98,15 +100,16 @@ impl Container {
             nix::fcntl::open(
                 "/dev/pts/ptmx",
                 nix::fcntl::OFlag::O_RDWR,
-                nix::sys::stat::Mode::all()
+                nix::sys::stat::Mode::all(),
             )
-        }).unwrap();
+        })
+        .unwrap();
 
-        if unsafe{ grantpt(pty_master) } < 0 {
-            return Err(())
+        if unsafe { grantpt(pty_master) } < 0 {
+            return Err(());
         }
-        if unsafe{ unlockpt(pty_master) } < 0 {
-            return Err(())
+        if unsafe { unlockpt(pty_master) } < 0 {
+            return Err(());
         }
 
         thread::spawn(move || {
@@ -144,14 +147,14 @@ impl Container {
     }
 
     fn child_main(command: &str, path_rootfs: &str, image_name: &str) -> isize {
-
         retry(Fixed::from_millis(50).take(20), || {
             let uid = geteuid().as_raw() as u32;
             match uid {
                 0 => Ok(()),
-                _ => Err(())
+                _ => Err(()),
             }
-        }).unwrap();
+        })
+        .unwrap();
 
         let child = Child::new(path_rootfs.to_string());
         child.pivot_root().unwrap();

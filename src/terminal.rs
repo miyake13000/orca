@@ -1,6 +1,6 @@
+use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg, Termios};
 use std::io::stdin;
 use std::os::unix::io::{AsRawFd, RawFd};
-use nix::sys::termios::{Termios, tcgetattr, tcsetattr, cfmakeraw, SetArg};
 
 pub struct Terminal {
     terminal_fd: RawFd,
@@ -14,10 +14,10 @@ impl Terminal {
         let current_termios = tcgetattr(terminal_fd).unwrap();
         let orig_termios = current_termios.clone();
 
-        Terminal{
+        Terminal {
             terminal_fd,
             current_termios,
-            orig_termios
+            orig_termios,
         }
     }
 

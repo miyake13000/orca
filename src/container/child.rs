@@ -1,11 +1,11 @@
+use crate::mount::{self, *};
+use nix::mount::MsFlags;
+use nix::unistd;
+use retry::{delay::Fixed, retry};
 use std::ffi::CStr;
 use std::fs;
-use std::io::{stdin, stderr, stdout};
+use std::io::{stderr, stdin, stdout};
 use std::os::unix::io::AsRawFd;
-use nix::unistd;
-use retry::{retry, delay::Fixed};
-use nix::mount::MsFlags;
-use crate::mount::{self, *};
 
 pub struct Child {
     rootfs_path: String,
@@ -13,9 +13,7 @@ pub struct Child {
 
 impl Child {
     pub fn new(rootfs_path: String) -> Self {
-        Child {
-            rootfs_path
-        }
+        Child { rootfs_path }
     }
 
     pub fn pivot_root(&self) -> std::result::Result<(), ()> {
@@ -69,16 +67,17 @@ impl Child {
             nix::fcntl::open(
                 "/dev/pts/0",
                 nix::fcntl::OFlag::O_RDWR,
-                nix::sys::stat::Mode::empty()
-                )
-        }).unwrap();
+                nix::sys::stat::Mode::empty(),
+            )
+        })
+        .unwrap();
 
         mount(mount::DEVCONSOLE)?;
 
         let pty_slave_fd = pty_slave.as_raw_fd();
         let stdout = stdout().as_raw_fd();
         let stderr = stderr().as_raw_fd();
-        let stdin  = stdin().as_raw_fd();
+        let stdin = stdin().as_raw_fd();
 
         let _ = unistd::dup2(pty_slave_fd, stdout).unwrap();
         let _ = unistd::dup2(pty_slave_fd, stderr).unwrap();

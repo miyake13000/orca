@@ -1,10 +1,10 @@
+use flate2::bufread::MultiGzDecoder;
 use serde::{Deserialize, Serialize};
-use std::io::{copy, BufReader};
 use std::fs::{self, File};
+use std::io::{copy, BufReader};
 use std::path::Path;
 use std::process::Command;
 use tar::Archive;
-use flate2::bufread::MultiGzDecoder;
 
 #[derive(Serialize, Deserialize)]
 #[allow(non_snake_case)]
@@ -36,7 +36,7 @@ pub struct Image {
     tarball_path: String,
     pub rootfs_path: String,
     pub image_name: String,
-    pub image_tag:  String,
+    pub image_tag: String,
 }
 
 impl Image {
@@ -44,11 +44,11 @@ impl Image {
         let tarball_path = format!("{}/image.tar.gz", &root_path);
         let rootfs_path = format!("{}/rootfs", &root_path);
         fs::create_dir_all(&root_path).unwrap();
-        Image{
+        Image {
             tarball_path,
             rootfs_path,
             image_name,
-            image_tag
+            image_tag,
         }
     }
 
@@ -59,12 +59,8 @@ impl Image {
     pub fn download(&self) -> std::result::Result<(), ()> {
         let token = Self::get_token(&self.image_name).unwrap();
         let layer_id = Self::get_layer_id(&self.image_name, &self.image_tag, &token).unwrap();
-        Self::download_layer_tarball(
-            &self.image_name,
-            &token,
-            &layer_id,
-            &self.tarball_path
-        ).unwrap();
+        Self::download_layer_tarball(&self.image_name, &token, &layer_id, &self.tarball_path)
+            .unwrap();
         Ok(())
     }
 
@@ -91,11 +87,7 @@ impl Image {
     fn get_token(image_name: &str) -> std::result::Result<String, ()> {
         let url = format!("https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/{}:pull", image_name);
         let client = reqwest::blocking::Client::new();
-        let resp = client.get(&url)
-            .send()
-            .unwrap()
-            .text()
-            .unwrap();
+        let resp = client.get(&url).send().unwrap().text().unwrap();
         let res_json: Res1 = serde_json::from_str(&resp).unwrap();
         Ok(res_json.token)
     }
@@ -103,17 +95,19 @@ impl Image {
     fn get_layer_id(
         image_name: &str,
         image_tag: &str,
-        token: &str
+        token: &str,
     ) -> std::result::Result<String, ()> {
-
         let url = format!(
             "https://registry-1.docker.io/v2/library/{}/manifests/{}",
-            image_name,
-            image_tag
+            image_name, image_tag
         );
         let client = reqwest::blocking::Client::new();
-        let resp = client.get(&url)
-            .header(reqwest::header::ACCEPT, "application/vnd.docker.distribution.manifest.v2+json")
+        let resp = client
+            .get(&url)
+            .header(
+                reqwest::header::ACCEPT,
+                "application/vnd.docker.distribution.manifest.v2+json",
+            )
             .bearer_auth(token)
             .send()
             .unwrap()
@@ -127,17 +121,16 @@ impl Image {
     fn get_var(
         token: &str,
         image_name: &str,
-        image_id: &str
+        image_id: &str,
     ) -> std::result::Result<(String, String), ()> {
-
         let url = format!(
             "https://registry-1.docker.io/v2/library/{}/blobs/{}",
-            image_name,
-            image_id
+            image_name, image_id
         );
 
         let client = reqwest::blocking::Client::new();
-        let resp = client.get(&url)
+        let resp = client
+            .get(&url)
             .bearer_auth(token)
             .send()
             .unwrap()
@@ -151,14 +144,14 @@ impl Image {
         image_name: &str,
         token: &str,
         layer_id: &str,
-        file_path: &str
+        file_path: &str,
     ) -> std::result::Result<(), ()> {
-        let url = format!("https://registry-1.docker.io/v2/library/{}/blobs/{}", image_name, layer_id);
+        let url = format!(
+            "https://registry-1.docker.io/v2/library/{}/blobs/{}",
+            image_name, layer_id
+        );
         let client = reqwest::blocking::Client::new();
-        let mut resp = client.get(&url)
-            .bearer_auth(token)
-            .send()
-            .unwrap();
+        let mut resp = client.get(&url).bearer_auth(token).send().unwrap();
 
         let mut file = File::create(file_path).unwrap();
         copy(&mut resp, &mut file).unwrap();

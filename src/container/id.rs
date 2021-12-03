@@ -1,7 +1,7 @@
+use nix::unistd::{getegid, geteuid};
 use std::env;
 use std::fs::File;
-use std::io::{BufReader, prelude::*};
-use nix::unistd::{geteuid, getegid};
+use std::io::{prelude::*, BufReader};
 
 pub struct MappingId {
     source_id: usize,
@@ -21,34 +21,34 @@ impl MappingId {
         match idtype {
             IdType::UID => {
                 let uid = Self::get_uid();
-                MappingId{
+                MappingId {
                     source_id: uid.0,
                     target_id: 0,
-                    range: uid.1
+                    range: uid.1,
                 }
             }
             IdType::GID => {
                 let gid = Self::get_gid();
-                MappingId{
+                MappingId {
                     source_id: gid.0,
                     target_id: 0,
-                    range: gid.1
+                    range: gid.1,
                 }
             }
             IdType::SUBUID => {
                 let subuid = Self::get_subuid();
-                MappingId{
+                MappingId {
                     source_id: subuid.0,
                     target_id: 1,
-                    range: subuid.1
+                    range: subuid.1,
                 }
             }
             IdType::SUBGID => {
                 let subgid = Self::get_subgid();
-                MappingId{
+                MappingId {
                     source_id: subgid.0,
                     target_id: 1,
-                    range: subgid.1
+                    range: subgid.1,
                 }
             }
         }
@@ -58,7 +58,7 @@ impl MappingId {
         vec![
             self.target_id.to_string(),
             self.source_id.to_string(),
-            self.range.to_string()
+            self.range.to_string(),
         ]
     }
 

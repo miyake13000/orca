@@ -1,43 +1,41 @@
-use std::{process, env};
-use std::path::Path;
-use std::ffi::OsStr;
 use std::cmp::PartialEq;
+use std::ffi::OsStr;
+use std::path::Path;
+use std::{env, process};
 
 pub struct Command<T, S, U>
-    where
-        T: AsRef<OsStr> + AsRef<Path>,
-        S: IntoIterator<Item = U> + PartialEq,
-        U: AsRef<OsStr>,
+where
+    T: AsRef<OsStr> + AsRef<Path>,
+    S: IntoIterator<Item = U> + PartialEq,
+    U: AsRef<OsStr>,
 {
     cmd_name: T,
     args: Option<S>,
 }
 
-impl <T, S, U>Command<T, S, U>
-    where
-        T: AsRef<OsStr> + AsRef<Path>,
-        S: IntoIterator<Item = U> + PartialEq,
-        U: AsRef<OsStr>,
+impl<T, S, U> Command<T, S, U>
+where
+    T: AsRef<OsStr> + AsRef<Path>,
+    S: IntoIterator<Item = U> + PartialEq,
+    U: AsRef<OsStr>,
 {
     pub fn new(cmd_name: T, args: Option<S>) -> Self {
-        Self {
-            cmd_name,
-            args,
-        }
+        Self { cmd_name, args }
     }
 
     pub fn is_exist(&self) -> bool {
-        let command_path =
-            env::var_os("PATH").and_then(|paths| {
-                env::split_paths(&paths).filter_map(|dir| {
+        let command_path = env::var_os("PATH").and_then(|paths| {
+            env::split_paths(&paths)
+                .filter_map(|dir| {
                     let full_path = dir.join(&self.cmd_name);
                     if full_path.is_file() {
                         Some(full_path)
                     } else {
                         None
                     }
-                }).next()
-            });
+                })
+                .next()
+        });
 
         if command_path != None {
             true
