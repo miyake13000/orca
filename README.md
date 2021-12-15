@@ -1,6 +1,6 @@
 # orca
 
-## Summury
+## Summary
 Lightweight rootless container management tool
 
 ## Prerequisities
