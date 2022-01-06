@@ -1,4 +1,6 @@
 use crate::mount::{self, *};
+use anyhow::{Context, Result};
+use core::convert::Infallible;
 use nix::mount::MsFlags;
 use nix::unistd;
 use retry::{delay::Fixed, retry};
@@ -16,7 +18,7 @@ impl Child {
         Child { rootfs_path }
     }
 
-    pub fn pivot_root(&self) -> std::result::Result<(), ()> {
+    pub fn pivot_root(&self) -> Result<()> {
         let oldroot_path = format!("{}/oldroot", self.rootfs_path);
 
         let mnt_args = MntArgs::new(
@@ -27,40 +29,42 @@ impl Child {
             MsFlags::MS_BIND,
             None,
         );
-        mount(mnt_args).unwrap();
+        mount(mnt_args).with_context(|| format!("Failed to bind mount '{}'", self.rootfs_path))?;
 
-        fs::create_dir_all(&oldroot_path).unwrap();
-        unistd::pivot_root(self.rootfs_path.as_str(), oldroot_path.as_str()).unwrap();
-        unistd::chdir("/").unwrap();
-
-        Ok(())
-    }
-
-    pub fn mount_all(&self) -> std::result::Result<(), ()> {
-        mount(mount::PROC)?;
-        mount(mount::DEV)?;
-        mount(mount::DEVPTS)?;
-        //mount(mount::SYSFS)?; // Cannot mount because netns isnt separated
-        mount(mount::MQUEUE)?;
-        mount(mount::SHM)?;
-        mount(mount::DEVNULL)?;
-        mount(mount::DEVRANDOM)?;
-        mount(mount::DEVFULL)?;
-        mount(mount::DEVTTY)?;
-        mount(mount::DEVZERO)?;
-        mount(mount::DEVURANDOM)?;
-
-        umount(mount::OLDROOT)?;
+        fs::create_dir_all(&oldroot_path)
+            .with_context(|| format!("Failed to create '{}'", oldroot_path))?;
+        unistd::pivot_root(self.rootfs_path.as_str(), oldroot_path.as_str())
+            .context("Failed to pivot_root")?;
+        unistd::chdir("/").context("Failed to chdir to /")?;
 
         Ok(())
     }
 
-    pub fn sethostname(&self, new_hostname: &str) -> std::result::Result<(), ()> {
-        unistd::sethostname(new_hostname).unwrap();
+    pub fn mount_all(&self) -> Result<()> {
+        mount(mount::PROC).context("Failed to mount /proc")?;
+        mount(mount::DEV).context("Failed to mount /dev")?;
+        mount(mount::DEVPTS).context("Failed to mount /dev/pts")?;
+        //mount(mount::SYSFS).context("Failed to mount /sys")?; // Cannot mount because netns isnt separated
+        mount(mount::MQUEUE).context("Failed to mount /dev/mqueue")?;
+        mount(mount::SHM).context("Failed to mount /dev/shm")?;
+        mount(mount::DEVNULL).context("Failed to mount /dev/null")?;
+        mount(mount::DEVRANDOM).context("Failed to mount /dev/random")?;
+        mount(mount::DEVFULL).context("Failed to mount /dev/full")?;
+        mount(mount::DEVTTY).context("Failed to mount /dev/tty")?;
+        mount(mount::DEVZERO).context("Failed to mount /dev/zero")?;
+        mount(mount::DEVURANDOM).context("Failed to mount /dev/urandom")?;
+
+        umount(mount::OLDROOT).context("Failed to unmount /oldroot")?;
+
         Ok(())
     }
 
-    pub fn connect_tty(&self) -> std::result::Result<(), ()> {
+    pub fn sethostname(&self, new_hostname: &str) -> Result<()> {
+        unistd::sethostname(new_hostname)?;
+        Ok(())
+    }
+
+    pub fn connect_tty(&self) -> Result<()> {
         let _ = unistd::setsid().unwrap();
 
         let pty_slave = retry(Fixed::from_millis(10).take(100), || {
@@ -70,23 +74,24 @@ impl Child {
                 nix::sys::stat::Mode::empty(),
             )
         })
-        .unwrap();
+        .context("Failed to open /dev/pts/0")?;
 
-        mount(mount::DEVCONSOLE)?;
+        mount(mount::DEVCONSOLE).context("Failed to mount /dev/console")?;
 
         let pty_slave_fd = pty_slave.as_raw_fd();
         let stdout = stdout().as_raw_fd();
         let stderr = stderr().as_raw_fd();
         let stdin = stdin().as_raw_fd();
 
-        let _ = unistd::dup2(pty_slave_fd, stdout).unwrap();
-        let _ = unistd::dup2(pty_slave_fd, stderr).unwrap();
-        let _ = unistd::dup2(pty_slave_fd, stdin).unwrap();
+        let _ = unistd::dup2(pty_slave_fd, stdout)?;
+        let _ = unistd::dup2(pty_slave_fd, stderr)?;
+        let _ = unistd::dup2(pty_slave_fd, stdin)?;
 
         Ok(())
     }
 
-    pub fn exec(self, command: &CStr, argv: &Vec<&CStr>, envp: &Vec<&CStr>) {
-        let _ = unistd::execvpe(command, argv, envp); // never return value
+    pub fn exec(self, command: &CStr, argv: &Vec<&CStr>, envp: &Vec<&CStr>) -> Result<Infallible> {
+        unistd::execvpe(command, argv, envp)
+            .with_context(|| format!("Not found: '{}'", command.to_str().unwrap()))
     }
 }

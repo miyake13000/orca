@@ -1,39 +1,41 @@
+use anyhow::{anyhow, Context, Result};
 use nix::mount::{MntFlags, MsFlags};
 use std::fs::{create_dir_all, metadata, File};
 
-pub fn mount(args: MntArgs) -> std::result::Result<(), ()> {
+pub fn mount(args: MntArgs) -> Result<()> {
     let metadata = metadata(args.dest);
 
     if metadata.is_err() {
         if args.is_file() {
-            File::create(args.dest).unwrap();
+            File::create(args.dest).with_context(|| format!("Failed to create '{}'", args.dest))?;
         } else if args.is_dir() {
-            create_dir_all(args.dest).unwrap();
+            create_dir_all(args.dest)
+                .with_context(|| format!("Failed to create '{}'", args.dest))?;
         } else {
-            return Err(());
+            return Err(anyhow!("cannot mount special file"));
         }
     } else if metadata.is_ok() {
         let file_attr = metadata.unwrap();
         if args.is_file() {
             if !file_attr.is_file() {
-                return Err(());
+                return Err(anyhow!("src is file but dest is not file"));
             }
         } else if args.is_dir() {
             if !file_attr.is_dir() {
-                return Err(());
+                return Err(anyhow!("src is dir but dest is not dir"));
             }
         } else {
-            return Err(());
+            return Err(anyhow!("dest is neither file nor dir"));
         }
     }
 
-    nix::mount::mount(args.src, args.dest, args.fstype, args.ms_flags, args.data).unwrap();
+    nix::mount::mount(args.src, args.dest, args.fstype, args.ms_flags, args.data)?;
 
     Ok(())
 }
 
-pub fn umount(args: UMntArgs) -> std::result::Result<(), ()> {
-    nix::mount::umount2(args.dest, args.mnt_flags).unwrap();
+pub fn umount(args: UMntArgs) -> Result<()> {
+    nix::mount::umount2(args.dest, args.mnt_flags)?;
 
     Ok(())
 }

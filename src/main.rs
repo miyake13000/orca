@@ -1,6 +1,7 @@
 // orca : CLI Container management tool
 // This program is managemented by nomlab <https://github.com/nomlab>
 
+use anyhow::{Context, Result};
 use dirs::home_dir;
 use orca::args::Args;
 use orca::command::Command;
@@ -8,7 +9,7 @@ use orca::container::Container;
 use orca::image::Image;
 use orca::terminal::Terminal;
 
-fn main() {
+fn main() -> Result<()> {
     let default_dest_name = String::from("debian");
     let default_dest_tag = String::from("latest");
     let default_command = String::from("sh");
@@ -28,7 +29,10 @@ fn main() {
 
     let rootfs_path = format!(
         "{}/.local/orca/{}/{}",
-        home_dir().unwrap().to_str().unwrap(),
+        home_dir()
+            .unwrap()
+            .to_str()
+            .context("Failed get HOME from environment variable")?,
         &args.image_name.as_ref().unwrap(),
         &args.image_tag.as_ref().unwrap()
     );
@@ -41,34 +45,36 @@ fn main() {
     if image.exist() {
         if args.init_flag {
             println!("Remove image already existing");
-            image.remove().unwrap();
+            image.remove()?;
             println!("Extract image");
-            image.extract().unwrap();
+            image.extract()?;
         }
     } else {
         println!("Download image");
-        image.download().unwrap();
+        image.download()?;
         println!("Extract image");
-        image.extract().unwrap();
+        image.extract()?;
     }
 
     let working_container =
-        Container::new(image, args.command.unwrap().to_string(), args.netns_flag);
+        Container::new(image, args.command.unwrap().to_string(), args.netns_flag)?;
 
     if Command::new("newuidmap", Option::<Vec<String>>::None).is_exist() {
-        working_container.map_id_with_subuid().unwrap();
+        working_container.map_id_with_subuid()?;
     } else {
-        working_container.map_id().unwrap();
+        working_container.map_id()?;
     }
 
-    working_container.connect_tty().unwrap();
+    working_container.connect_tty()?;
 
-    let mut terminal = Terminal::new();
-    terminal.into_raw_mode().unwrap();
+    let mut terminal = Terminal::new()?;
+    terminal.into_raw_mode()?;
 
-    let used_image = working_container.wait().unwrap();
+    let used_image = working_container.wait()?;
 
     if args.remove_flag {
-        used_image.remove().unwrap();
+        used_image.remove()?;
     }
+
+    Ok(())
 }

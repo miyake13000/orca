@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use nix::unistd::{getegid, geteuid};
 use std::env;
 use std::fs::File;
@@ -10,51 +11,51 @@ pub struct MappingId {
 }
 
 pub enum IdType {
-    UID,
-    GID,
-    SUBUID,
-    SUBGID,
+    Uid,
+    Gid,
+    SubUid,
+    SubGid,
 }
 
 impl MappingId {
-    pub fn new(idtype: IdType) -> Self {
+    pub fn new(idtype: IdType) -> Result<Self> {
         match idtype {
-            IdType::UID => {
+            IdType::Uid => {
                 let uid = Self::get_uid();
-                MappingId {
+                Ok(MappingId {
                     source_id: uid.0,
                     target_id: 0,
                     range: uid.1,
-                }
+                })
             }
-            IdType::GID => {
+            IdType::Gid => {
                 let gid = Self::get_gid();
-                MappingId {
+                Ok(MappingId {
                     source_id: gid.0,
                     target_id: 0,
                     range: gid.1,
-                }
+                })
             }
-            IdType::SUBUID => {
-                let subuid = Self::get_subuid();
-                MappingId {
+            IdType::SubUid => {
+                let subuid = Self::get_subuid().context("Failed to get subuid")?;
+                Ok(MappingId {
                     source_id: subuid.0,
                     target_id: 1,
                     range: subuid.1,
-                }
+                })
             }
-            IdType::SUBGID => {
-                let subgid = Self::get_subgid();
-                MappingId {
+            IdType::SubGid => {
+                let subgid = Self::get_subgid().context("Failed to get subgid")?;
+                Ok(MappingId {
                     source_id: subgid.0,
                     target_id: 1,
                     range: subgid.1,
-                }
+                })
             }
         }
     }
 
-    pub fn into_vec(&self) -> Vec<String> {
+    pub fn into_vec(self) -> Vec<String> {
         vec![
             self.target_id.to_string(),
             self.source_id.to_string(),
@@ -78,14 +79,15 @@ impl MappingId {
         (gid, range)
     }
 
-    fn get_subuid() -> (usize, usize) {
+    fn get_subuid() -> Result<(usize, usize)> {
         let path = "/etc/subuid";
-        let file = File::open(path).unwrap();
+        let file = File::open(path).with_context(|| format!("Failed to open '{}'", path))?;
         let mut reader = BufReader::new(file);
         let mut contents = String::new();
         let _ = reader.read_to_string(&mut contents);
 
-        let username = env::var("USER").unwrap();
+        let username =
+            env::var("USER").context("Failed to get USER from environmental variable")?;
         let user_entry = username + ":";
 
         let mut subuid: usize = 0;
@@ -94,21 +96,22 @@ impl MappingId {
         for line in contents.lines() {
             if line.starts_with(&user_entry) {
                 let v: Vec<&str> = line.split(':').collect();
-                subuid = v[1].parse().unwrap();
-                range = v[2].parse().unwrap();
+                subuid = v[1].parse().context("Invalid subuid format")?;
+                range = v[2].parse().context("Invalid subuid format")?;
             }
         }
-        (subuid, range)
+        Ok((subuid, range))
     }
 
-    fn get_subgid() -> (usize, usize) {
+    fn get_subgid() -> Result<(usize, usize)> {
         let path = "/etc/subgid";
-        let file = File::open(path).unwrap();
+        let file = File::open(path).with_context(|| format!("Failed to open '{}'", path))?;
         let mut reader = BufReader::new(file);
         let mut contents = String::new();
         let _ = reader.read_to_string(&mut contents);
 
-        let username = env::var("USER").unwrap();
+        let username =
+            env::var("USER").context("Failed to get USER from environmental variable")?;
         let user_entry = username + ":";
 
         let mut subgid: usize = 0;
@@ -117,10 +120,10 @@ impl MappingId {
         for line in contents.lines() {
             if line.starts_with(&user_entry) {
                 let v: Vec<&str> = line.split(':').collect();
-                subgid = v[1].parse().unwrap();
-                range = v[2].parse().unwrap();
+                subgid = v[1].parse().context("Invalid subgid format")?;
+                range = v[2].parse().context("Invalid subgid format")?;
             }
         }
-        (subgid, range)
+        Ok((subgid, range))
     }
 }
