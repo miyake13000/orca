@@ -34,26 +34,43 @@ struct Res2 {
 }
 
 pub struct Image {
-    tarball_path: String,
+    pub tarball_path: String,
     pub rootfs_path: String,
     pub image_name: String,
     pub image_tag: String,
 }
 
 impl Image {
-    pub fn new(root_path: String, image_name: String, image_tag: String) -> Self {
-        let tarball_path = format!("{}/image.tar.gz", &root_path);
-        let rootfs_path = format!("{}/rootfs", &root_path);
-        fs::create_dir_all(&root_path).unwrap();
+    pub fn new(
+        rootfs_prefix: String,
+        image_name: String,
+        image_tag: String,
+        container_name: String,
+    ) -> Self {
+        let image_name_safe = if image_name.contains('/') {
+            image_name.replace("/", "_")
+        } else {
+            image_name
+        };
+
+        let image_root_path = format!("{}/{}/{}", rootfs_prefix, image_name_safe, image_tag);
+        let tarball_path = format!("{}/image.tar.gz", image_root_path);
+        let rootfs_path = format!("{}/{}/rootfs", image_root_path, container_name);
+        fs::create_dir_all(image_root_path).unwrap();
+
         Image {
             tarball_path,
             rootfs_path,
-            image_name,
+            image_name: image_name_safe,
             image_tag,
         }
     }
 
-    pub fn exist(&self) -> bool {
+    pub fn image_exists(&self) -> bool {
+        Path::new(&self.tarball_path).exists()
+    }
+
+    pub fn container_exists(&self) -> bool {
         Path::new(&self.rootfs_path).exists()
     }
 

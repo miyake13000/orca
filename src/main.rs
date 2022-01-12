@@ -10,58 +10,59 @@ use orca::image::Image;
 use orca::terminal::Terminal;
 
 fn main() -> Result<()> {
-    let default_dest_name = String::from("debian");
-    let default_dest_tag = String::from("latest");
+    let default_image_name = String::from("debian");
+    let default_image_tag = String::from("latest");
+    let default_container_name = String::from("_default");
     let default_command = String::from("sh");
 
     let mut args = Args::new();
     args.set_args(); // Set args from stdin into args instanse
 
-    if args.image_name == None {
-        args.image_name = Some(default_dest_name);
-    }
-    if args.image_tag == None {
-        args.image_tag = Some(default_dest_tag);
-    }
-    if args.command == None {
-        args.command = Some(default_command);
-    }
+    let image_name = if let Some(image_name) = args.image_name {
+        image_name
+    } else {
+        default_image_name
+    };
+    let image_tag = if let Some(image_tag) = args.image_tag {
+        image_tag
+    } else {
+        default_image_tag
+    };
+    let container_name = if let Some(container_name) = args.container_name {
+        container_name
+    } else {
+        default_container_name
+    };
+    let command = if let Some(command) = args.command {
+        command
+    } else {
+        default_command
+    };
 
-    let rootfs_path = format!(
-        "{}/.local/orca/{}/{}",
+    let image_path_prefix = format!(
+        "{}/.local/orca",
         home_dir()
             .unwrap()
             .to_str()
             .context("Failed get HOME from environment variable")?,
-        &args.image_name.as_ref().unwrap(),
-        &args.image_tag.as_ref().unwrap()
     );
 
-    let image = Image::new(
-        rootfs_path,
-        args.image_name.unwrap().to_string(),
-        args.image_tag.unwrap().to_string(),
-    );
-    if image.exist() {
-        if args.init_flag {
-            println!("Remove image already existing");
-            image.remove()?;
-            println!("Extract image");
-            image.extract()?;
-        }
-    } else {
+    let image = Image::new(image_path_prefix, image_name, image_tag, container_name);
+
+    if args.init_flag {
+        println!("Remove image");
+        image.remove()?;
+    }
+    if !image.image_exists() {
         println!("Download image");
         image.download()?;
+    }
+    if !image.container_exists() {
         println!("Extract image");
         image.extract()?;
     }
 
-    let working_container = Container::new(
-        image,
-        args.command.unwrap().to_string(),
-        args.cmd_args,
-        args.netns_flag,
-    )?;
+    let working_container = Container::new(image, command, args.cmd_args, args.netns_flag)?;
 
     if Command::new("newuidmap", Option::<Vec<String>>::None).is_exist() {
         working_container.map_id_with_subuid()?;

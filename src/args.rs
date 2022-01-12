@@ -3,6 +3,7 @@ use clap::{App, AppSettings, Arg};
 pub struct Args {
     pub image_name: Option<String>,
     pub image_tag: Option<String>,
+    pub container_name: Option<String>,
     pub command: Option<String>,
     pub cmd_args: Option<Vec<String>>,
     pub init_flag: bool,
@@ -15,6 +16,7 @@ impl Args {
         Args {
             image_name: None,
             image_tag: None,
+            container_name: None,
             command: None,
             cmd_args: None,
             init_flag: false,
@@ -32,7 +34,7 @@ impl Args {
             .usage("orca [FLAGS] [OPTIONS] [COMMAND [ARGS..]]")
             .arg(
                 Arg::with_name("image")
-                    .short("d")
+                    .short("i")
                     .long("image")
                     .help("Image name of container image")
                     .takes_value(true),
@@ -45,21 +47,25 @@ impl Args {
                     .takes_value(true),
             )
             .arg(
+                Arg::with_name("name")
+                    .short("n")
+                    .long("name")
+                    .help("Name of container")
+                    .takes_value(true),
+            )
+            .arg(
                 Arg::with_name("init")
-                    .short("i")
                     .long("init")
                     .help("Initialize contaier image before running a command"),
             )
             .arg(
                 Arg::with_name("remove")
-                    .short("r")
-                    .long("remove")
+                    .long("rm")
                     .help("Remove container image after running a command"),
             )
             .arg(
                 Arg::with_name("use_netns")
-                    .short("n")
-                    .long("netns")
+                    .long("use-netns")
                     .help("Isolate network namespace"),
             );
 
@@ -71,8 +77,8 @@ impl Args {
         if let Some(o) = matches.value_of("tag") {
             self.image_tag = Some(o.to_string());
         }
-        if let Some(o) = matches.value_of("COMMAND") {
-            self.command = Some(o.to_string());
+        if let Some(o) = matches.value_of("name") {
+            self.container_name = Some(o.to_string());
         }
         self.init_flag = matches.is_present("init");
         self.remove_flag = matches.is_present("remove");
