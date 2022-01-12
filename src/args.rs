@@ -1,9 +1,10 @@
-use clap::{App, Arg};
+use clap::{App, AppSettings, Arg};
 
 pub struct Args {
     pub image_name: Option<String>,
     pub image_tag: Option<String>,
     pub command: Option<String>,
+    pub cmd_args: Option<Vec<String>>,
     pub init_flag: bool,
     pub remove_flag: bool,
     pub netns_flag: bool,
@@ -15,6 +16,7 @@ impl Args {
             image_name: None,
             image_tag: None,
             command: None,
+            cmd_args: None,
             init_flag: false,
             remove_flag: false,
             netns_flag: false,
@@ -23,9 +25,11 @@ impl Args {
 
     pub fn set_args(&mut self) {
         let app = App::new(crate_name!())
+            .setting(AppSettings::AllowExternalSubcommands)
             .version(crate_version!())
             .author(crate_authors!())
             .about(crate_description!())
+            .usage("orca [FLAGS] [OPTIONS] [COMMAND [ARGS..]]")
             .arg(
                 Arg::with_name("image")
                     .short("d")
@@ -57,8 +61,7 @@ impl Args {
                     .short("n")
                     .long("netns")
                     .help("Isolate network namespace"),
-            )
-            .arg(Arg::with_name("COMMAND").help("Command to execute in container"));
+            );
 
         let matches = app.get_matches();
 
@@ -74,5 +77,29 @@ impl Args {
         self.init_flag = matches.is_present("init");
         self.remove_flag = matches.is_present("remove");
         self.netns_flag = matches.is_present("use_netns");
+        match matches.subcommand() {
+            (external, Some(arg_matches)) => {
+                let command = if external.is_empty() {
+                    None
+                } else {
+                    Some(external.to_string())
+                };
+                let args = if let Some(values) = arg_matches.values_of("") {
+                    Some(values.map(|arg| arg.to_string()).collect())
+                } else {
+                    None
+                };
+                self.command = command;
+                self.cmd_args = args;
+            }
+            (external, None) => {
+                let command = if external.is_empty() {
+                    None
+                } else {
+                    Some(external.to_string())
+                };
+                self.command = command;
+            }
+        };
     }
 }

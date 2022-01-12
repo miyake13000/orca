@@ -24,9 +24,16 @@ pub struct Container {
 }
 
 impl Container {
-    pub fn new(image: Image, command: String, netns_flag: bool) -> Result<Self> {
+    pub fn new(
+        image: Image,
+        command: String,
+        cmd_args: Option<Vec<String>>,
+        netns_flag: bool,
+    ) -> Result<Self> {
         let ref mut stack: [u8; STACK_SIZE] = [0; STACK_SIZE];
-        let cb = Box::new(|| Self::child_main(&command, &image.rootfs_path, &image.image_name));
+        let cb = Box::new(|| {
+            Self::child_main(&command, &cmd_args, &image.rootfs_path, &image.image_name)
+        });
         let signals = Some(libc::SIGCHLD);
 
         let mut flags = CloneFlags::empty();
@@ -161,7 +168,12 @@ impl Container {
         Ok(self.image)
     }
 
-    fn child_main(command: &str, path_rootfs: &str, image_name: &str) -> isize {
+    fn child_main(
+        command: &str,
+        cmd_args: &Option<Vec<String>>,
+        path_rootfs: &str,
+        image_name: &str,
+    ) -> isize {
         retry(Fixed::from_millis(50).take(20), || {
             let uid = geteuid().as_raw() as u32;
             match uid {
@@ -183,11 +195,32 @@ impl Container {
             .context("Failed to connect_tty")
             .unwrap();
 
+        // convert command: String -> command_cstr: CStr
         let command_cstring = CString::new(command)
             .context("Failed to change command into CSting")
             .unwrap();
         let command_cstr = command_cstring.as_c_str();
-        let argv: Vec<&CStr> = vec![command_cstr];
+
+        // convert cmd_args: Vec<String> -> cmd_args_cstring: Vec<CString>
+        let mut cmd_args_cstring: Vec<CString> = Vec::new();
+        let cmd_args = cmd_args.clone();
+        if let Some(args) = cmd_args {
+            let cmd_args_iter = args.iter();
+            for arg in cmd_args_iter {
+                let arg_cstring = CString::new(arg.as_str())
+                    .context("Failed to change arg into CString")
+                    .unwrap();
+                cmd_args_cstring.push(arg_cstring);
+            }
+        }
+
+        // create argv
+        let mut argv: Vec<&CStr> = vec![command_cstr];
+        for arg in cmd_args_cstring.iter() {
+            argv.push(arg.as_c_str());
+        }
+
+        //create envp
         let envp: Vec<&CStr> = vec![
             CStr::from_bytes_with_nul(b"SHELL=/bin/sh\0").unwrap(),
             CStr::from_bytes_with_nul(b"HOME=/root\0").unwrap(),

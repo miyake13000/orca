@@ -56,8 +56,12 @@ fn main() -> Result<()> {
         image.extract()?;
     }
 
-    let working_container =
-        Container::new(image, args.command.unwrap().to_string(), args.netns_flag)?;
+    let working_container = Container::new(
+        image,
+        args.command.unwrap().to_string(),
+        args.cmd_args,
+        args.netns_flag,
+    )?;
 
     if Command::new("newuidmap", Option::<Vec<String>>::None).is_exist() {
         working_container.map_id_with_subuid()?;
