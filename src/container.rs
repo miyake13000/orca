@@ -30,7 +30,7 @@ impl Container {
         cmd_args: Option<Vec<String>>,
         netns_flag: bool,
     ) -> Result<Self> {
-        let ref mut stack: [u8; STACK_SIZE] = [0; STACK_SIZE];
+        let stack: &mut [u8; STACK_SIZE] = &mut [0; STACK_SIZE];
         let cb = Box::new(|| {
             Self::child_main(&command, &cmd_args, &image.rootfs_path, &image.image_name)
         });
