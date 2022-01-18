@@ -1,5 +1,6 @@
 mod child;
 mod id;
+mod io_connector;
 
 use crate::command::Command;
 use crate::image::Image;
@@ -7,20 +8,21 @@ use crate::STACK_SIZE;
 use anyhow::{anyhow, Context, Result};
 use child::Child;
 use id::{IdType, MappingId};
+use io_connector::IoConnector;
 use libc::{grantpt, unlockpt};
 use nix::sched::{clone, setns, CloneFlags};
 use nix::sys::wait::wait;
-use nix::unistd::{geteuid, read, write, Pid};
+use nix::unistd::{geteuid, Pid};
 use retry::{delay::Fixed, retry};
 use std::ffi::{CStr, CString};
 use std::fs::{File, OpenOptions};
 use std::io::{stdin, stdout, Write};
 use std::os::unix::io::AsRawFd;
-use std::thread;
 
 pub struct Container {
     image: Image,
     child_pid: Pid,
+    io_connector: Option<IoConnector>,
 }
 
 impl Container {
@@ -49,7 +51,11 @@ impl Container {
         let child_pid =
             clone(cb, stack, flags, signals).context("Failed to clone child process")?;
 
-        Ok(Container { image, child_pid })
+        Ok(Container {
+            image,
+            child_pid,
+            io_connector: None,
+        })
     }
 
     pub fn map_id(&self) -> Result<()> {
@@ -114,7 +120,7 @@ impl Container {
         Ok(())
     }
 
-    pub fn connect_tty(&self) -> Result<()> {
+    pub fn connect_tty(&mut self) -> Result<()> {
         Self::setns(self.child_pid).context("Faield to setns")?;
         let pty_master_path = "/dev/pts/ptmx";
 
@@ -134,37 +140,21 @@ impl Container {
             return Err(anyhow!("Failed to unlockpt('{}')", pty_master_path));
         }
 
-        thread::spawn(move || {
-            let stdout = stdout().as_raw_fd();
-            let mut s: [u8; 1] = [0; 1];
-            loop {
-                if read(pty_master, &mut s).is_err() {
-                    return;
-                };
-                if write(stdout, &s).is_err() {
-                    return;
-                };
-            }
-        });
-
-        thread::spawn(move || {
-            let stdin = stdin().as_raw_fd();
-            let mut s: [u8; 1] = [0; 1];
-            loop {
-                if nix::unistd::read(stdin, &mut s).is_err() {
-                    return;
-                }
-                if nix::unistd::write(pty_master, &s).is_err() {
-                    return;
-                }
-            }
-        });
+        self.io_connector = Some(IoConnector::new(
+            stdout().as_raw_fd(),
+            stdin().as_raw_fd(),
+            pty_master,
+            pty_master,
+        ));
 
         Ok(())
     }
 
     pub fn wait(self) -> Result<Image> {
         wait().context("Failed to wait child process")?;
+        if let Some(io_connector) = self.io_connector {
+            io_connector.stop()?;
+        }
         Ok(self.image)
     }
 
