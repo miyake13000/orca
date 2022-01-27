@@ -18,6 +18,7 @@ use std::ffi::{CStr, CString};
 use std::fs::{File, OpenOptions};
 use std::io::{stdin, stdout, Write};
 use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
 
 pub struct Container {
     image: Image,
@@ -34,7 +35,12 @@ impl Container {
     ) -> Result<Self> {
         let stack: &mut [u8; STACK_SIZE] = &mut [0; STACK_SIZE];
         let cb = Box::new(|| {
-            Self::child_main(&command, &cmd_args, &image.rootfs_path, &image.image_name)
+            Self::child_main(
+                &command,
+                &cmd_args,
+                &image.image_root(),
+                &image.container_name(),
+            )
         });
         let signals = Some(libc::SIGCHLD);
 
@@ -161,7 +167,7 @@ impl Container {
     fn child_main(
         command: &str,
         cmd_args: &Option<Vec<String>>,
-        path_rootfs: &str,
+        path_rootfs: &PathBuf,
         image_name: &str,
     ) -> isize {
         retry(Fixed::from_millis(50).take(20), || {
@@ -173,7 +179,7 @@ impl Container {
         })
         .expect("Failed to uid mapping");
 
-        let child = Child::new(path_rootfs.to_string());
+        let child = Child::new(path_rootfs.to_path_buf());
         child.pivot_root().context("Failed to pivot_root").unwrap();
         child.mount_all().context("Failed to mount").unwrap();
         child

@@ -1,12 +1,17 @@
 #[macro_use]
 extern crate clap;
+extern crate anyhow;
 extern crate dirs;
+extern crate flate2;
 extern crate libc;
 extern crate nix;
 extern crate reqwest;
 extern crate retry;
+extern crate rm_rf;
 extern crate serde;
 extern crate serde_json;
+extern crate tar;
+extern crate walkdir;
 
 pub mod args;
 pub mod command;

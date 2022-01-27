@@ -8,33 +8,34 @@ use std::ffi::CStr;
 use std::fs;
 use std::io::{stderr, stdin, stdout};
 use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
 
 pub struct Child {
-    rootfs_path: String,
+    rootfs_path: PathBuf,
 }
 
 impl Child {
-    pub fn new(rootfs_path: String) -> Self {
+    pub fn new(rootfs_path: PathBuf) -> Self {
         Child { rootfs_path }
     }
 
     pub fn pivot_root(&self) -> Result<()> {
-        let oldroot_path = format!("{}/oldroot", self.rootfs_path);
+        let oldroot_path = self.rootfs_path.join("oldroot");
 
         let mnt_args = MntArgs::new(
             FileAttr::Dir,
-            Some(&self.rootfs_path),
-            &self.rootfs_path,
+            Some(&self.rootfs_path.to_str().unwrap()),
+            &self.rootfs_path.to_str().unwrap(),
             None,
             MsFlags::MS_BIND,
             None,
         );
-        mount(mnt_args).with_context(|| format!("Failed to bind mount '{}'", self.rootfs_path))?;
+        mount(mnt_args)
+            .with_context(|| format!("Failed to bind mount '{}'", self.rootfs_path.display()))?;
 
         fs::create_dir_all(&oldroot_path)
-            .with_context(|| format!("Failed to create '{}'", oldroot_path))?;
-        unistd::pivot_root(self.rootfs_path.as_str(), oldroot_path.as_str())
-            .context("Failed to pivot_root")?;
+            .with_context(|| format!("Failed to create '{}'", oldroot_path.display()))?;
+        unistd::pivot_root(&self.rootfs_path, &oldroot_path).context("Failed to pivot_root")?;
         unistd::chdir("/").context("Failed to chdir to /")?;
 
         Ok(())

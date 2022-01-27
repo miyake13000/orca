@@ -1,7 +1,7 @@
 // orca : CLI Container management tool
 // This program is managemented by nomlab <https://github.com/nomlab>
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use dirs::home_dir;
 use orca::args::Args;
 use orca::command::Command;
@@ -12,7 +12,7 @@ use orca::terminal::Terminal;
 fn main() -> Result<()> {
     let default_image_name = String::from("debian");
     let default_image_tag = String::from("latest");
-    let default_container_name = String::from("_default");
+    let default_container_name = String::from("orca");
     let default_command = String::from("sh");
 
     let mut args = Args::new();
@@ -39,27 +39,24 @@ fn main() -> Result<()> {
         default_command
     };
 
-    let image_path_prefix = format!(
-        "{}/.local/orca",
-        home_dir()
-            .unwrap()
-            .to_str()
-            .context("Failed get HOME from environment variable")?,
-    );
+    let image_root = home_dir().unwrap().join(".local").join("orca");
 
-    let image = Image::new(image_path_prefix, image_name, image_tag, container_name);
+    let image = Image::new(image_root, image_name, image_tag, container_name);
 
-    if args.init_flag {
-        println!("Remove image");
-        image.remove()?;
+    if args.init_flag && image.exists_container() {
+        print!("Removing old image");
+        image.remove_container()?;
     }
-    if !image.image_exists() {
-        println!("Download image");
+    if !image.exists_image() {
+        println!("Downloading image");
+        println!("This may take a few minute");
         image.download()?;
     }
-    if !image.container_exists() {
-        println!("Extract image");
-        image.extract()?;
+    if !image.exists_container() {
+        println!("Creating container");
+        image.create_container_image()?;
+    } else {
+        println!("Enter image already exists")
     }
 
     let mut working_container = Container::new(image, command, args.cmd_args, args.netns_flag)?;
@@ -69,7 +66,6 @@ fn main() -> Result<()> {
     } else {
         working_container.map_id()?;
     }
-
     working_container.connect_tty()?;
 
     let mut terminal = Terminal::new()?;
@@ -78,7 +74,7 @@ fn main() -> Result<()> {
     let used_image = working_container.wait()?;
 
     if args.remove_flag {
-        used_image.remove()?;
+        used_image.remove_container()?;
     }
 
     Ok(())
