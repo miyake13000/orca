@@ -182,14 +182,9 @@ impl Container {
         let child = Child::new(path_rootfs.to_path_buf());
         child.pivot_root().context("Failed to pivot_root").unwrap();
         child.mount_all().context("Failed to mount").unwrap();
-        child
-            .sethostname(image_name)
-            .context("Failed to sethostname")
-            .unwrap();
-        child
-            .connect_tty()
-            .context("Failed to connect_tty")
-            .unwrap();
+        child.sethostname(image_name).unwrap();
+        child.connect_tty().unwrap();
+        child.create_mandatory_files().unwrap();
 
         // convert command: String -> command_cstr: CStr
         let command_cstring = CString::new(command)

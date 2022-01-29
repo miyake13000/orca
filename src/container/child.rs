@@ -4,11 +4,13 @@ use core::convert::Infallible;
 use nix::mount::MsFlags;
 use nix::unistd;
 use retry::{delay::Fixed, retry};
+use rm_rf::remove;
 use std::ffi::CStr;
-use std::fs;
+use std::fs::{self, copy};
 use std::io::{stderr, stdin, stdout};
+use std::os::unix::fs::symlink;
 use std::os::unix::io::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct Child {
     rootfs_path: PathBuf,
@@ -24,8 +26,8 @@ impl Child {
 
         let mnt_args = MntArgs::new(
             FileAttr::Dir,
-            Some(&self.rootfs_path.to_str().unwrap()),
-            &self.rootfs_path.to_str().unwrap(),
+            Some(self.rootfs_path.to_str().unwrap()),
+            self.rootfs_path.to_str().unwrap(),
             None,
             MsFlags::MS_BIND,
             None,
@@ -55,8 +57,19 @@ impl Child {
         mount(mount::DEVZERO).context("Failed to mount /dev/zero")?;
         mount(mount::DEVURANDOM).context("Failed to mount /dev/urandom")?;
 
-        umount(mount::OLDROOT).context("Failed to unmount /oldroot")?;
+        Ok(())
+    }
 
+    pub fn create_mandatory_files(&self) -> Result<()> {
+        let ptmx = Path::new("/dev/ptmx");
+        let host_resolvconf = Path::new("/oldroot/etc/resolv.conf");
+        let resolvconf = Path::new("/etc/resolv.conf");
+
+        if !ptmx.exists() {
+            symlink("pts/ptmx", ptmx).context("Failed to create symlink: /dev/ptmx -> pts/ptmx")?;
+        }
+        copy(host_resolvconf, resolvconf)
+            .context("Failed to copy /oldroot/etc/resolv.conf to /etc/resolv.conf")?;
         Ok(())
     }
 
@@ -92,6 +105,8 @@ impl Child {
     }
 
     pub fn exec(self, command: &CStr, argv: &Vec<&CStr>, envp: &Vec<&CStr>) -> Result<Infallible> {
+        umount(mount::OLDROOT).context("Failed to unmount /oldroot")?;
+        remove("/oldroot")?;
         unistd::execvpe(command, argv, envp)
             .with_context(|| format!("Not found: '{}'", command.to_str().unwrap()))
     }
