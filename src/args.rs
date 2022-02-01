@@ -1,3 +1,4 @@
+use clap::{crate_authors, crate_description, crate_name, crate_version};
 use clap::{App, AppSettings, Arg};
 
 pub struct Args {
