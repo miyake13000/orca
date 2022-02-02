@@ -3,7 +3,7 @@ use nix::unistd::{read, write};
 use std::os::unix::io::RawFd;
 use std::thread;
 
-pub struct IoConnector {}
+pub struct IoConnector;
 
 impl IoConnector {
     pub fn new(
@@ -39,6 +39,7 @@ impl IoConnector {
     }
 
     pub fn stop(self) -> Result<()> {
+        //TODO: add process to join thread
         Ok(())
     }
 }

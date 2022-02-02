@@ -23,7 +23,7 @@ impl Terminal {
         })
     }
 
-    pub fn into_raw_mode(&mut self) -> Result<()> {
+    pub fn make_raw_mode(&mut self) -> Result<()> {
         cfmakeraw(&mut self.current_termios);
         tcsetattr(self.terminal_fd, SetArg::TCSAFLUSH, &self.current_termios)
             .context("Failed to change terminal settings")?;

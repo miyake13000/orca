@@ -1,29 +1,25 @@
 mod child;
-mod id;
-mod io_connector;
+mod parent;
+mod terminal;
 
 use crate::command::Command;
 use crate::image::Image;
+use crate::OrExit;
 use crate::STACK_SIZE;
-use anyhow::{anyhow, Context, Result};
-use child::Child;
-use id::{IdType, MappingId};
-use io_connector::IoConnector;
-use libc::{grantpt, unlockpt};
-use nix::sched::{clone, setns, CloneFlags};
+use anyhow::{Context, Result};
+use nix::sched::{clone, CloneFlags};
 use nix::sys::wait::wait;
-use nix::unistd::{geteuid, Pid};
-use retry::{delay::Fixed, retry};
-use std::ffi::{CStr, CString};
-use std::fs::{File, OpenOptions};
-use std::io::{stdin, stdout, Write};
-use std::os::unix::io::AsRawFd;
-use std::path::PathBuf;
+use nix::unistd::Pid;
+use parent::io_connector::IoConnector;
+use std::ffi::CStr;
+use std::path::Path;
+use terminal::Terminal;
 
 pub struct Container {
     image: Image,
     child_pid: Pid,
     io_connector: Option<IoConnector>,
+    terminal: Terminal,
 }
 
 impl Container {
@@ -35,21 +31,20 @@ impl Container {
     ) -> Result<Self> {
         let stack: &mut [u8; STACK_SIZE] = &mut [0; STACK_SIZE];
         let cb = Box::new(|| {
-            Self::child_main(
+            child_main(
                 &command,
                 &cmd_args,
-                &image.image_root(),
+                image.image_root().as_path(),
                 &image.container_name(),
             )
         });
         let signals = Some(libc::SIGCHLD);
 
-        let mut flags = CloneFlags::empty();
-        flags.insert(CloneFlags::CLONE_NEWUSER);
-        flags.insert(CloneFlags::CLONE_NEWNS);
-        flags.insert(CloneFlags::CLONE_NEWUTS);
-        flags.insert(CloneFlags::CLONE_NEWPID);
-        flags.insert(CloneFlags::CLONE_NEWIPC);
+        let mut flags = CloneFlags::CLONE_NEWNS
+            | CloneFlags::CLONE_NEWUTS
+            | CloneFlags::CLONE_NEWIPC
+            | CloneFlags::CLONE_NEWPID
+            | CloneFlags::CLONE_NEWUSER;
         if netns_flag {
             flags.insert(CloneFlags::CLONE_NEWNET);
         }
@@ -57,101 +52,25 @@ impl Container {
         let child_pid =
             clone(cb, stack, flags, signals).context("Failed to clone child process")?;
 
+        if Command::new("newuidmap", Option::<Vec<String>>::None).is_exist() {
+            parent::Initilizer::map_id_with_subuid(child_pid)?;
+        } else {
+            parent::Initilizer::map_id(child_pid)?;
+        }
+
+        let terminal = Terminal::new()?;
+
         Ok(Container {
             image,
             child_pid,
             io_connector: None,
+            terminal,
         })
-    }
-
-    pub fn map_id(&self) -> Result<()> {
-        let mapping_uid = MappingId::new(IdType::Uid)?;
-        let mapping_gid = MappingId::new(IdType::Gid)?;
-
-        let uid_map_path = format!("/proc/{}/uid_map", self.child_pid);
-        let gid_map_path = format!("/proc/{}/gid_map", self.child_pid);
-        let setgroups_path = format!("/proc/{}/setgroups", self.child_pid);
-
-        OpenOptions::new()
-            .append(true)
-            .open(&uid_map_path)
-            .with_context(|| format!("Failed to open '{}'", uid_map_path))?
-            .write_all(&mapping_uid.to_string().into_bytes())
-            .with_context(|| format!("Faield to write to '{}", uid_map_path))?;
-
-        OpenOptions::new()
-            .append(true)
-            .open(&setgroups_path)
-            .with_context(|| format!("Faield to open '{}", setgroups_path))?
-            .write_all(b"deny")
-            .with_context(|| format!(" Failed to write to '{}", setgroups_path))?;
-
-        OpenOptions::new()
-            .append(true)
-            .open(&gid_map_path)
-            .with_context(|| format!("Failed to open '{}", gid_map_path))?
-            .write_all(&mapping_gid.to_string().into_bytes())
-            .with_context(|| format!("Faield to write to '{}", gid_map_path))?;
-
-        Ok(())
-    }
-
-    pub fn map_id_with_subuid(&self) -> Result<()> {
-        let mut args_uidmap: Vec<String> = vec![self.child_pid.to_string()];
-        let mut args_gidmap: Vec<String> = vec![self.child_pid.to_string()];
-
-        let mapping_uid = MappingId::new(IdType::Uid)?;
-        let mapping_gid = MappingId::new(IdType::Gid)?;
-        let mapping_subuid = MappingId::new(IdType::SubUid)?;
-        let mapping_subgid = MappingId::new(IdType::SubGid)?;
-
-        let _ = args_uidmap.append(&mut mapping_uid.into_vec());
-        let _ = args_gidmap.append(&mut mapping_gid.into_vec());
-        let _ = args_uidmap.append(&mut mapping_subuid.into_vec());
-        let _ = args_gidmap.append(&mut mapping_subgid.into_vec());
-
-        let newuidmap_status = Command::new("newuidmap", Some(args_uidmap)).execute()?;
-        match newuidmap_status {
-            Some(code) if code < 0 => return Err(anyhow!("newuidmap is exited with {}", code)),
-            None => return Err(anyhow!("newuidmap is exited with no status")),
-            _ => {}
-        }
-        let newgidmap_status = Command::new("newgidmap", Some(args_gidmap)).execute()?;
-        match newgidmap_status {
-            Some(code) if code < 0 => return Err(anyhow!("newgidmap is exited with {}", code)),
-            None => return Err(anyhow!("newgidmap is exited with no status")),
-            _ => {}
-        }
-
-        Ok(())
     }
 
     pub fn connect_tty(&mut self) -> Result<()> {
-        Self::setns(self.child_pid).context("Faield to setns")?;
-        let pty_master_path = "/dev/pts/ptmx";
-
-        let pty_master = retry(Fixed::from_millis(50).take(20), || {
-            nix::fcntl::open(
-                pty_master_path,
-                nix::fcntl::OFlag::O_RDWR,
-                nix::sys::stat::Mode::all(),
-            )
-        })
-        .with_context(|| format!("Failed to open '{}'", pty_master_path))?;
-
-        if unsafe { grantpt(pty_master) } < 0 {
-            return Err(anyhow!("Failed to grantpt('{}')", pty_master_path));
-        }
-        if unsafe { unlockpt(pty_master) } < 0 {
-            return Err(anyhow!("Failed to unlockpt('{}')", pty_master_path));
-        }
-
-        self.io_connector = Some(IoConnector::new(
-            stdout().as_raw_fd(),
-            stdin().as_raw_fd(),
-            pty_master,
-            pty_master,
-        ));
+        self.io_connector = Some(parent::Initilizer::connect_tty(self.child_pid)?);
+        self.terminal.make_raw_mode()?;
 
         Ok(())
     }
@@ -163,87 +82,51 @@ impl Container {
         }
         Ok(self.image)
     }
+}
 
-    fn child_main(
-        command: &str,
-        cmd_args: &Option<Vec<String>>,
-        path_rootfs: &PathBuf,
-        image_name: &str,
-    ) -> isize {
-        retry(Fixed::from_millis(50).take(20), || {
-            let uid = geteuid().as_raw() as u32;
-            match uid {
-                0 => Ok(()),
-                _ => Err(()),
-            }
-        })
-        .expect("Failed to uid mapping");
+#[allow(clippy::needless_return)]
+fn child_main(
+    command: &str,
+    cmd_args: &Option<Vec<String>>,
+    rootfs_path: &Path,
+    image_name: &str,
+) -> isize {
+    use child::Initializer;
+    let error_message = "Failed to initialize container";
 
-        let child = Child::new(path_rootfs.to_path_buf());
-        child.pivot_root().context("Failed to pivot_root").unwrap();
-        child.mount_all().context("Failed to mount").unwrap();
-        child.sethostname(image_name).unwrap();
-        child.connect_tty().unwrap();
-        child.create_mandatory_files().unwrap();
+    Initializer::wait_for_mapping_id()
+        .context(error_message)
+        .or_exit();
+    Initializer::pivot_root(rootfs_path)
+        .context(error_message)
+        .or_exit();
+    Initializer::mount_mandatory_files()
+        .context(error_message)
+        .or_exit();
+    Initializer::create_ptmx_link()
+        .context(error_message)
+        .or_exit();
+    Initializer::copy_resolv_conf()
+        .context(error_message)
+        .or_exit();
+    Initializer::set_hostname(image_name)
+        .context(error_message)
+        .or_exit();
+    Initializer::connect_tty().context(error_message).or_exit();
+    Initializer::unmount_old_root()
+        .context(error_message)
+        .or_exit();
 
-        // convert command: String -> command_cstr: CStr
-        let command_cstring = CString::new(command)
-            .context("Failed to change command into CSting")
-            .unwrap();
-        let command_cstr = command_cstring.as_c_str();
+    let envp: Vec<&CStr> = vec![
+        CStr::from_bytes_with_nul(b"SHELL=/bin/sh\0").unwrap(),
+        CStr::from_bytes_with_nul(b"HOME=/root\0").unwrap(),
+        CStr::from_bytes_with_nul(b"TERM=xterm\0").unwrap(),
+        CStr::from_bytes_with_nul(b"PATH=/bin:/usr/bin:/sbin:/usr/sbin\0").unwrap(),
+    ];
 
-        // convert cmd_args: Vec<String> -> cmd_args_cstring: Vec<CString>
-        let mut cmd_args_cstring: Vec<CString> = Vec::new();
-        let cmd_args = cmd_args.clone();
-        if let Some(args) = cmd_args {
-            let cmd_args_iter = args.iter();
-            for arg in cmd_args_iter {
-                let arg_cstring = CString::new(arg.as_str())
-                    .context("Failed to change arg into CString")
-                    .unwrap();
-                cmd_args_cstring.push(arg_cstring);
-            }
-        }
+    Initializer::exec(command, cmd_args.clone(), &envp)
+        .context("Failed to initialize container")
+        .or_exit();
 
-        // create argv
-        let mut argv: Vec<&CStr> = vec![command_cstr];
-        for arg in cmd_args_cstring.iter() {
-            argv.push(arg.as_c_str());
-        }
-
-        //create envp
-        let envp: Vec<&CStr> = vec![
-            CStr::from_bytes_with_nul(b"SHELL=/bin/sh\0").unwrap(),
-            CStr::from_bytes_with_nul(b"HOME=/root\0").unwrap(),
-            CStr::from_bytes_with_nul(b"TERM=xterm\0").unwrap(),
-            CStr::from_bytes_with_nul(b"PATH=/bin:/usr/bin:/sbin:/usr/sbin\0").unwrap(),
-        ];
-
-        child
-            .exec(command_cstr, &argv, &envp)
-            .context("Failed to exec")
-            .unwrap();
-
-        return 0; // Unreachable but neccessary for clone
-    }
-
-    fn setns(child_pid: Pid) -> Result<()> {
-        let raw_child_pid = child_pid.as_raw() as isize;
-
-        let userns_filename = format!("/proc/{}/ns/user", raw_child_pid);
-        let mntns_filename = format!("/proc/{}/ns/mnt", raw_child_pid);
-
-        let userns = File::open(&userns_filename)
-            .with_context(|| format!("Failed to open '{}", userns_filename))?;
-        let mntns = File::open(&mntns_filename)
-            .with_context(|| format!("Failed to open '{}", mntns_filename))?;
-
-        let userns_fd = userns.as_raw_fd();
-        let mntns_fd = mntns.as_raw_fd();
-
-        setns(userns_fd, CloneFlags::CLONE_NEWUSER).context("Failed to setns to userns")?;
-        setns(mntns_fd, CloneFlags::CLONE_NEWNS).context("Failed to setns to mntns")?;
-
-        Ok(())
-    }
+    return 0; // This unreachable code is neccessary for CloneCb
 }

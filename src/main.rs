@@ -4,10 +4,8 @@
 use anyhow::Result;
 use dirs::home_dir;
 use orca::args::Args;
-use orca::command::Command;
 use orca::container::Container;
 use orca::image::Image;
-use orca::terminal::Terminal;
 
 fn main() -> Result<()> {
     let default_image_name = String::from("debian");
@@ -60,16 +58,7 @@ fn main() -> Result<()> {
     }
 
     let mut working_container = Container::new(image, command, args.cmd_args, args.netns_flag)?;
-
-    if Command::new("newuidmap", Option::<Vec<String>>::None).is_exist() {
-        working_container.map_id_with_subuid()?;
-    } else {
-        working_container.map_id()?;
-    }
     working_container.connect_tty()?;
-
-    let mut terminal = Terminal::new()?;
-    terminal.into_raw_mode()?;
 
     let used_image = working_container.wait()?;
 
