@@ -3,7 +3,7 @@ mod parent;
 mod terminal;
 
 use crate::command::Command;
-use crate::image::Image;
+use crate::image::{ContainerImage, Image};
 use crate::OrExit;
 use crate::STACK_SIZE;
 use anyhow::{Context, Result};
@@ -12,7 +12,6 @@ use nix::sys::wait::wait;
 use nix::unistd::Pid;
 use parent::io_connector::IoConnector;
 use std::ffi::CStr;
-use std::path::Path;
 use terminal::Terminal;
 
 pub struct Container {
@@ -30,14 +29,7 @@ impl Container {
         netns_flag: bool,
     ) -> Result<Self> {
         let stack: &mut [u8; STACK_SIZE] = &mut [0; STACK_SIZE];
-        let cb = Box::new(|| {
-            child_main(
-                &command,
-                &cmd_args,
-                image.image_root().as_path(),
-                &image.container_name(),
-            )
-        });
+        let cb = Box::new(|| child_main(&command, &cmd_args, &image));
         let signals = Some(libc::SIGCHLD);
 
         let mut flags = CloneFlags::CLONE_NEWNS
@@ -85,19 +77,19 @@ impl Container {
 }
 
 #[allow(clippy::needless_return)]
-fn child_main(
-    command: &str,
-    cmd_args: &Option<Vec<String>>,
-    rootfs_path: &Path,
-    image_name: &str,
-) -> isize {
+fn child_main<T, U>(command: T, cmd_args: &Option<Vec<U>>, image: &Image) -> isize
+where
+    T: AsRef<str>,
+    U: AsRef<str> + Clone,
+{
     use child::Initializer;
     let error_message = "Failed to initialize container";
 
     Initializer::wait_for_mapping_id()
         .context(error_message)
         .or_exit();
-    Initializer::pivot_root(rootfs_path)
+    image.mount().context(error_message).or_exit();
+    Initializer::pivot_root(image.image_root())
         .context(error_message)
         .or_exit();
     Initializer::mount_mandatory_files()
@@ -109,7 +101,7 @@ fn child_main(
     Initializer::copy_resolv_conf()
         .context(error_message)
         .or_exit();
-    Initializer::set_hostname(image_name)
+    Initializer::set_hostname(image.container_name())
         .context(error_message)
         .or_exit();
     Initializer::connect_tty().context(error_message).or_exit();

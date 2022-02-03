@@ -1,7 +1,6 @@
 use crate::mount::{self, *};
 use anyhow::{anyhow, Context, Result};
 use core::convert::Infallible;
-use nix::mount::MsFlags;
 use nix::unistd;
 use nix::unistd::geteuid;
 use retry::{delay::Fixed, retry};
@@ -28,22 +27,13 @@ impl Initializer {
         .map_err(|_| anyhow!("Time out to wait for mapping UID"))
     }
 
-    pub fn pivot_root<T: AsRef<Path>>(new_root: T) -> Result<()> {
-        let old_root = PathBuf::from(new_root.as_ref()).join(OLDROOT);
-        let mnt_args = MntArgs::new(
-            FileAttr::Dir,
-            Some(new_root.as_ref().to_str().unwrap()),
-            new_root.as_ref().to_str().unwrap(),
-            None,
-            MsFlags::MS_BIND,
-            None,
-        );
-        mount(mnt_args)
-            .with_context(|| format!("Failed to bind mount '{}'", new_root.as_ref().display()))?;
+    pub fn pivot_root<T: Into<PathBuf>>(new_root: T) -> Result<()> {
+        let new_root = new_root.into();
+        let old_root = new_root.join(OLDROOT);
 
         fs::create_dir_all(old_root.as_path())
             .with_context(|| format!("Failed to create '{}'", old_root.display()))?;
-        unistd::pivot_root(new_root.as_ref(), old_root.as_path())
+        unistd::pivot_root(new_root.as_path(), old_root.as_path())
             .context("Failed to pivot_root")?;
         unistd::chdir("/").context("Failed to chdir to /")?;
 

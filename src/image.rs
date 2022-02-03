@@ -1,9 +1,11 @@
 mod image_downloader;
 mod image_merger;
 
+use crate::mount::{mount, FileAttr, MntArgs};
 use anyhow::{Context, Result};
 use image_downloader::ImageDownloader;
 use image_merger::ImageMerger;
+use nix::mount::MsFlags;
 use rm_rf::remove;
 use std::fs::create_dir_all;
 use std::path::{Path, PathBuf};
@@ -108,5 +110,30 @@ impl Image {
 
     pub fn image_root(&self) -> PathBuf {
         self.container_path.clone()
+    }
+}
+
+pub trait ContainerImage {
+    fn mount(&self) -> Result<()>;
+    fn need_userns(&self) -> bool;
+}
+
+impl ContainerImage for Image {
+    fn mount(&self) -> Result<()> {
+        let continer_root = self.container_path.to_str().unwrap();
+        let mnt_args = MntArgs::new(
+            FileAttr::Dir,
+            Some(continer_root),
+            continer_root,
+            None,
+            MsFlags::MS_BIND,
+            None,
+        );
+        mount(mnt_args).with_context(|| format!("Failed to bind mount '{}'", continer_root))?;
+        Ok(())
+    }
+
+    fn need_userns(&self) -> bool {
+        true
     }
 }
