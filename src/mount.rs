@@ -1,257 +1,153 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{bail, Context, Result};
 use nix::mount::{MntFlags, MsFlags};
-use std::fs::{create_dir_all, metadata, File};
-
-pub fn mount(args: MntArgs) -> Result<()> {
-    let metadata = metadata(args.dest);
-
-    if metadata.is_err() {
-        if args.is_file() {
-            File::create(args.dest).with_context(|| format!("Failed to create '{}'", args.dest))?;
-        } else if args.is_dir() {
-            create_dir_all(args.dest)
-                .with_context(|| format!("Failed to create '{}'", args.dest))?;
-        } else {
-            return Err(anyhow!("cannot mount special file"));
-        }
-    } else if metadata.is_ok() {
-        let file_attr = metadata.unwrap();
-        if args.is_file() {
-            if !file_attr.is_file() {
-                return Err(anyhow!("src is file but dest is not file"));
-            }
-        } else if args.is_dir() {
-            if !file_attr.is_dir() {
-                return Err(anyhow!("src is dir but dest is not dir"));
-            }
-        } else {
-            return Err(anyhow!("dest is neither file nor dir"));
-        }
-    }
-
-    nix::mount::mount(args.src, args.dest, args.fstype, args.ms_flags, args.data)?;
-
-    Ok(())
-}
-
-pub fn umount(args: UMntArgs) -> Result<()> {
-    nix::mount::umount2(args.dest, args.mnt_flags)?;
-
-    Ok(())
-}
+use rm_rf::remove;
+use std::fs::{create_dir_all, File};
+use std::path::Path;
 
 #[derive(Eq, PartialEq, Ord, PartialOrd)]
-pub enum FileAttr {
+pub enum FileType {
     File,
     Dir,
-    Ohter,
 }
 
-pub struct MntArgs<'a> {
-    file_attr: FileAttr,
-    src: Option<&'a str>,
-    dest: &'a str,
-    fstype: Option<&'a str>,
-    ms_flags: MsFlags,
-    data: Option<&'a str>,
-}
-
-impl<'a> MntArgs<'a> {
-    pub fn new(
-        file_attr: FileAttr,
-        src: Option<&'a str>,
-        dest: &'a str,
-        fstype: Option<&'a str>,
-        ms_flags: MsFlags,
-        data: Option<&'a str>,
-    ) -> Self {
-        Self {
-            file_attr,
-            src,
-            dest,
-            fstype,
-            ms_flags,
-            data,
-        }
-    }
+impl FileType {
     pub fn is_file(&self) -> bool {
-        if self.file_attr == FileAttr::File {
-            true
-        } else {
-            false
-        }
+        *self == FileType::File
     }
 
     pub fn is_dir(&self) -> bool {
-        if self.file_attr == FileAttr::Dir {
-            true
-        } else {
-            false
-        }
+        *self == FileType::Dir
     }
 }
 
-pub struct UMntArgs<'a> {
-    file_attr: FileAttr,
-    dest: &'a str,
-    mnt_flags: MntFlags,
+pub type MountFlags = MsFlags;
+
+pub struct Mount<P1, P2> {
+    src: Option<P1>,
+    dest: P1,
+    fs_type: Option<P2>,
+    flags: MountFlags,
+    data: Option<P2>,
+    file_type: FileType,
 }
 
-impl<'a> UMntArgs<'a> {
-    pub fn new(file_attr: FileAttr, dest: &'a str, mnt_flags: MntFlags) -> Self {
+impl<P1, P2> Mount<P1, P2>
+where
+    P1: AsRef<Path>,
+    P2: AsRef<str>,
+{
+    pub fn new(dest: P1, file_type: FileType) -> Self {
         Self {
-            file_attr,
+            src: None,
             dest,
-            mnt_flags,
+            fs_type: None,
+            flags: MountFlags::empty(),
+            data: None,
+            file_type,
         }
     }
 
-    pub fn is_file(&self) -> bool {
-        if self.file_attr == FileAttr::File {
-            true
-        } else {
-            false
-        }
+    pub fn src(mut self, src: P1) -> Self {
+        self.src = Some(src);
+        self
     }
 
-    pub fn is_dir(&self) -> bool {
-        if self.file_attr == FileAttr::Dir {
-            true
-        } else {
-            false
+    pub fn fs_type(mut self, fs_type: P2) -> Self {
+        self.fs_type = Some(fs_type);
+        self
+    }
+
+    pub fn data(mut self, data: P2) -> Self {
+        self.data = Some(data);
+        self
+    }
+
+    pub fn flags(mut self, flags: MountFlags) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    pub fn add_flags(mut self, flag: MountFlags) -> Self {
+        self.flags = self.flags.union(flag);
+        self
+    }
+
+    pub fn mount(self) -> Result<()> {
+        let dest_path = self.dest.as_ref();
+        let metadata = dest_path.metadata();
+
+        if let Ok(dest_file_type) = metadata {
+            if self.file_type.is_dir() && !dest_file_type.is_dir() {
+                bail!("Cannot mount directory on file: {}", dest_path.display());
+            } else if self.file_type.is_file() && dest_file_type.is_dir() {
+                bail!("Cannot mount file on directory: {}", dest_path.display());
+            }
+        } else if metadata.is_err() {
+            if self.file_type.is_file() {
+                File::create(dest_path)
+                    .with_context(|| format!("Failed to create '{}'", dest_path.display()))?;
+            } else {
+                create_dir_all(dest_path)
+                    .with_context(|| format!("Failed to create '{}'", dest_path.display()))?;
+            }
         }
+
+        nix::mount::mount(
+            self.src.as_ref().map(|o| o.as_ref()),
+            self.dest.as_ref(),
+            self.fs_type.as_ref().map(|o| o.as_ref()),
+            self.flags,
+            self.data.as_ref().map(|o| o.as_ref()),
+        )?;
+
+        Ok(())
     }
 }
 
-pub const PROC: MntArgs = MntArgs {
-    file_attr: FileAttr::Dir,
-    src: Some("proc"),
-    dest: "/proc",
-    fstype: Some("proc"),
-    ms_flags: MsFlags::from_bits_truncate(
-        MsFlags::MS_NODEV.bits() | MsFlags::MS_NOSUID.bits() | MsFlags::MS_NOEXEC.bits(),
-    ),
-    data: None,
-};
+pub type UnMountFlags = MntFlags;
 
-pub const DEV: MntArgs = MntArgs {
-    file_attr: FileAttr::Dir,
-    src: Some("tmpfs"),
-    dest: "/dev",
-    fstype: Some("tmpfs"),
-    ms_flags: MsFlags::MS_NOSUID,
-    data: Some("mode=755"),
-};
+pub struct UnMount<T> {
+    dest: T,
+    flags: UnMountFlags,
+    remove_mount_point: bool,
+}
 
-pub const DEVPTS: MntArgs = MntArgs {
-    file_attr: FileAttr::Dir,
-    src: Some("devpts"),
-    dest: "/dev/pts",
-    fstype: Some("devpts"),
-    ms_flags: MsFlags::from_bits_truncate(MsFlags::MS_NOSUID.bits() | MsFlags::MS_NOEXEC.bits()),
-    data: Some("mode=620,ptmxmode=666"),
-};
+impl<T: AsRef<Path>> UnMount<T> {
+    pub fn new(dest: T) -> Self {
+        Self {
+            dest,
+            flags: UnMountFlags::empty(),
+            remove_mount_point: false,
+        }
+    }
 
-pub const SYSFS: MntArgs = MntArgs {
-    file_attr: FileAttr::Dir,
-    src: Some("sysfs"),
-    dest: "/sys",
-    fstype: None,
-    ms_flags: MsFlags::from_bits_truncate(
-        MsFlags::MS_RDONLY.bits()
-            | MsFlags::MS_NOSUID.bits()
-            | MsFlags::MS_NODEV.bits()
-            | MsFlags::MS_NOEXEC.bits(),
-    ),
-    data: None,
-};
+    pub fn flags(mut self, flags: UnMountFlags) -> Self {
+        self.flags = flags;
+        self
+    }
 
-pub const MQUEUE: MntArgs = MntArgs {
-    file_attr: FileAttr::Dir,
-    src: Some("mqueue"),
-    dest: "/dev/mqueue",
-    fstype: Some("mqueue"),
-    ms_flags: MsFlags::from_bits_truncate(
-        MsFlags::MS_NODEV.bits() | MsFlags::MS_NOSUID.bits() | MsFlags::MS_NOEXEC.bits(),
-    ),
-    data: None,
-};
+    pub fn add_flag(mut self, flag: UnMountFlags) -> Self {
+        self.flags = self.flags | flag;
+        self
+    }
 
-pub const SHM: MntArgs = MntArgs {
-    file_attr: FileAttr::Dir,
-    src: Some("shm"),
-    dest: "/dev/shm",
-    fstype: Some("tmpfs"),
-    ms_flags: MsFlags::from_bits_truncate(
-        MsFlags::MS_NODEV.bits() | MsFlags::MS_NOSUID.bits() | MsFlags::MS_NOEXEC.bits(),
-    ),
-    data: None,
-};
+    pub fn remove_mount_point(mut self, flag: bool) -> Self {
+        self.remove_mount_point = flag;
+        self
+    }
 
-pub const DEVNULL: MntArgs = MntArgs {
-    file_attr: FileAttr::File,
-    src: Some("/oldroot/dev/null"),
-    dest: "/dev/null",
-    fstype: None,
-    ms_flags: MsFlags::MS_BIND,
-    data: None,
-};
+    pub fn unmount(self) -> Result<()> {
+        let dest = self.dest.as_ref();
+        nix::mount::umount2(dest, self.flags)?;
 
-pub const DEVRANDOM: MntArgs = MntArgs {
-    file_attr: FileAttr::File,
-    src: Some("/oldroot/dev/random"),
-    dest: "/dev/random",
-    fstype: None,
-    ms_flags: MsFlags::MS_BIND,
-    data: None,
-};
-pub const DEVFULL: MntArgs = MntArgs {
-    file_attr: FileAttr::File,
-    src: Some("/oldroot/dev/full"),
-    dest: "/dev/full",
-    fstype: None,
-    ms_flags: MsFlags::MS_BIND,
-    data: None,
-};
+        if self.remove_mount_point {
+            if dest.is_file() || dest.is_dir() {
+                remove(dest)?;
+            } else {
+                bail!("Cannot remove: '{}'", dest.display());
+            }
+        }
 
-pub const DEVTTY: MntArgs = MntArgs {
-    file_attr: FileAttr::File,
-    src: Some("/oldroot/dev/tty"),
-    dest: "/dev/tty",
-    fstype: None,
-    ms_flags: MsFlags::MS_BIND,
-    data: None,
-};
-
-pub const DEVZERO: MntArgs = MntArgs {
-    file_attr: FileAttr::File,
-    src: Some("/oldroot/dev/zero"),
-    dest: "/dev/zero",
-    fstype: None,
-    ms_flags: MsFlags::MS_BIND,
-    data: None,
-};
-
-pub const DEVURANDOM: MntArgs = MntArgs {
-    file_attr: FileAttr::File,
-    src: Some("/oldroot/dev/urandom"),
-    dest: "/dev/urandom",
-    fstype: None,
-    ms_flags: MsFlags::MS_BIND,
-    data: None,
-};
-
-pub const DEVCONSOLE: MntArgs = MntArgs {
-    file_attr: FileAttr::File,
-    src: Some("/dev/pts/0"),
-    dest: "/dev/console",
-    fstype: Some("proc"),
-    ms_flags: MsFlags::MS_BIND,
-    data: None,
-};
-
-pub const OLDROOT: UMntArgs = UMntArgs {
-    file_attr: FileAttr::Dir,
-    dest: "/oldroot",
-    mnt_flags: MntFlags::MNT_DETACH,
-};
+        Ok(())
+    }
+}

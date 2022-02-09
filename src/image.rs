@@ -1,11 +1,10 @@
 mod image_downloader;
 mod image_merger;
 
-use crate::mount::{mount, FileAttr, MntArgs};
+use crate::mount::{FileType, Mount, MountFlags};
 use anyhow::{Context, Result};
 use image_downloader::ImageDownloader;
 use image_merger::ImageMerger;
-use nix::mount::MsFlags;
 use rm_rf::remove;
 use std::fs::create_dir_all;
 use std::path::{Path, PathBuf};
@@ -120,16 +119,12 @@ pub trait ContainerImage {
 
 impl ContainerImage for Image {
     fn mount(&self) -> Result<()> {
-        let continer_root = self.container_path.to_str().unwrap();
-        let mnt_args = MntArgs::new(
-            FileAttr::Dir,
-            Some(continer_root),
-            continer_root,
-            None,
-            MsFlags::MS_BIND,
-            None,
-        );
-        mount(mnt_args).with_context(|| format!("Failed to bind mount '{}'", continer_root))?;
+        Mount::<_, &str>::new(&self.container_path, FileType::Dir)
+            .src(&self.container_path)
+            .flags(MountFlags::MS_BIND)
+            .mount()
+            .with_context(|| format!("Failed to bind mount '{}'", self.container_path.display()))?;
+
         Ok(())
     }
 

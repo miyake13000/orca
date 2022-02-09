@@ -1,11 +1,12 @@
-use crate::mount::{self, *};
+use crate::mount::*;
 use anyhow::{anyhow, Context, Result};
+use const_format::concatcp;
 use core::convert::Infallible;
 use nix::unistd;
 use nix::unistd::geteuid;
 use retry::{delay::Fixed, retry};
 use std::ffi::{CStr, CString};
-use std::fs::{self, copy, remove_dir};
+use std::fs::{self, copy};
 use std::io::{stderr, stdin, stdout};
 use std::os::unix::fs::symlink;
 use std::os::unix::io::AsRawFd;
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 pub struct Initializer;
 
-const OLDROOT: &str = "oldroot";
+const OLDROOT_NAME: &str = "oldroot";
 
 impl Initializer {
     pub fn wait_for_mapping_id() -> Result<()> {
@@ -29,7 +30,7 @@ impl Initializer {
 
     pub fn pivot_root<T: Into<PathBuf>>(new_root: T) -> Result<()> {
         let new_root = new_root.into();
-        let old_root = new_root.join(OLDROOT);
+        let old_root = new_root.join(OLDROOT_NAME);
 
         fs::create_dir_all(old_root.as_path())
             .with_context(|| format!("Failed to create '{}'", old_root.display()))?;
@@ -41,19 +42,89 @@ impl Initializer {
     }
 
     pub fn mount_mandatory_files() -> Result<()> {
-        mount(mount::PROC).context("Failed to mount /proc")?;
-        mount(mount::DEV).context("Failed to mount /dev")?;
-        mount(mount::DEVPTS).context("Failed to mount /dev/pts")?;
-        mount(mount::MQUEUE).context("Failed to mount /dev/mqueue")?;
-        mount(mount::SHM).context("Failed to mount /dev/shm")?;
-        mount(mount::DEVNULL).context("Failed to mount /dev/null")?;
-        mount(mount::DEVRANDOM).context("Failed to mount /dev/random")?;
-        mount(mount::DEVFULL).context("Failed to mount /dev/full")?;
-        mount(mount::DEVTTY).context("Failed to mount /dev/tty")?;
-        mount(mount::DEVZERO).context("Failed to mount /dev/zero")?;
-        mount(mount::DEVURANDOM).context("Failed to mount /dev/urandom")?;
-        //mount(mount::SYSFS).context("Failed to mount /sys")?;
-        // trying to mount sysfs must fail with unknown reason
+        Mount::new("proc", FileType::Dir)
+            .src("proc")
+            .fs_type("proc")
+            .flags(MountFlags::MS_NODEV | MountFlags::MS_NOSUID | MountFlags::MS_NOEXEC)
+            .mount()
+            .context("Failed to mount /proc")?;
+
+        Mount::new("/dev", FileType::Dir)
+            .src("tmpfs")
+            .fs_type("tmpfs")
+            .flags(MountFlags::MS_NOSUID)
+            .data("mode=755")
+            .mount()
+            .context("Failed to mount /proc")?;
+
+        Mount::new("/dev/pts", FileType::Dir)
+            .src("devpts")
+            .fs_type("devpts")
+            .flags(MountFlags::MS_NOSUID | MountFlags::MS_NOEXEC)
+            .data("mode=620,ptmxmode=666")
+            .mount()
+            .context("Failed to mount /proc")?;
+
+        Mount::<_, &str>::new("/dev/mqueue", FileType::Dir)
+            .src("mqueue")
+            .fs_type("mqueue")
+            .flags(MountFlags::MS_NOSUID | MountFlags::MS_NODEV | MountFlags::MS_NOEXEC)
+            .mount()
+            .context("Failed to mount /proc")?;
+
+        Mount::<_, &str>::new("/dev/shm", FileType::Dir)
+            .src("shm")
+            .fs_type("tmpfs")
+            .flags(MountFlags::MS_NOSUID | MountFlags::MS_NODEV | MountFlags::MS_NOEXEC)
+            .mount()
+            .context("Failed to mount /proc")?;
+
+        Mount::<_, &str>::new("/dev/null", FileType::File)
+            .src(concatcp!("/", OLDROOT_NAME, "/dev/null"))
+            .flags(MountFlags::MS_BIND)
+            .mount()
+            .context("Failed to mount /proc")?;
+
+        Mount::<_, &str>::new("/dev/random", FileType::File)
+            .src(concatcp!("/", OLDROOT_NAME, "/dev/random"))
+            .flags(MountFlags::MS_BIND)
+            .mount()
+            .context("Failed to mount /proc")?;
+
+        Mount::<_, &str>::new("/dev/full", FileType::File)
+            .src(concatcp!("/", OLDROOT_NAME, "/dev/full"))
+            .flags(MountFlags::MS_BIND)
+            .mount()
+            .context("Failed to mount /proc")?;
+
+        Mount::<_, &str>::new("/dev/tty", FileType::File)
+            .src(concatcp!("/", OLDROOT_NAME, "/dev/tty"))
+            .flags(MountFlags::MS_BIND)
+            .mount()
+            .context("Failed to mount /proc")?;
+
+        Mount::<_, &str>::new("/dev/zero", FileType::File)
+            .src(concatcp!("/", OLDROOT_NAME, "/dev/zero"))
+            .flags(MountFlags::MS_BIND)
+            .mount()
+            .context("Failed to mount /proc")?;
+
+        Mount::<_, &str>::new("/dev/urandom", FileType::File)
+            .src(concatcp!("/", OLDROOT_NAME, "/dev/urandom"))
+            .flags(MountFlags::MS_BIND)
+            .mount()
+            .context("Failed to mount /proc")?;
+
+        //BUG: trying to mount sysfs must fail with unknown reason
+        //MountArgs::new("/sys", FileType::Dir)
+        //    .src("sysfs")
+        //    .fs_type("sysfs")
+        //    .add_flags(MountFlags::MS_RDONLY)
+        //    .add_flags(MountFlags::MS_NOSUID)
+        //    .add_flags(MountFlags::MS_NODEV)
+        //    .add_flags(MountFlags::MS_NOEXEC)
+        //    .mount()
+        //    .context("Failed to mount /proc")?;
 
         Ok(())
     }
@@ -67,7 +138,9 @@ impl Initializer {
     }
 
     pub fn copy_resolv_conf() -> Result<()> {
-        let host_resolvconf: PathBuf = PathBuf::from("/").join(OLDROOT).join("etc/resolv.conf");
+        let host_resolvconf: PathBuf = PathBuf::from("/")
+            .join(OLDROOT_NAME)
+            .join("etc/resolv.conf");
         let resolvconf = Path::new("/etc/resolv.conf");
         copy(host_resolvconf.as_path(), resolvconf).with_context(|| {
             format!(
@@ -104,15 +177,22 @@ impl Initializer {
         let _ = unistd::dup2(pty_slave_fd, stderr)?;
         let _ = unistd::dup2(pty_slave_fd, stdin)?;
 
-        mount(mount::DEVCONSOLE).context("Failed to mount /dev/console")?;
+        Mount::<_, &str>::new("/dev/console", FileType::File)
+            .src(concatcp!("/", OLDROOT_NAME, "/dev/console"))
+            .flags(MountFlags::MS_BIND)
+            .mount()
+            .context("Failed to mount /dev/console")?;
 
         Ok(())
     }
 
     pub fn unmount_old_root() -> Result<()> {
-        let old_root = PathBuf::from("/").join(OLDROOT);
-        umount(mount::OLDROOT).context("Failed to unmount /oldroot")?;
-        remove_dir(old_root)?;
+        UnMount::new(concatcp!("/", OLDROOT_NAME))
+            .remove_mount_point(true)
+            .flags(UnMountFlags::MNT_DETACH)
+            .unmount()
+            .context("Failed to unmount /oldroot")?;
+
         Ok(())
     }
 
