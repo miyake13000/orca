@@ -10,7 +10,7 @@ use std::fs::create_dir_all;
 use std::path::{Path, PathBuf};
 
 const ROOTFS_NAME: &str = "rootfs";
-const DEFAULT_WORKDIR: &str = "/tmp/orca/image";
+const DEFAULT_WORKDIR: &str = "/tmp/image_downloader/";
 
 pub struct Image {
     image_path: PathBuf,
@@ -19,6 +19,7 @@ pub struct Image {
     image_name: String,
     image_tag: String,
     container_name: String,
+    display_progress: bool,
 }
 
 impl Image {
@@ -49,11 +50,18 @@ impl Image {
             image_name,
             image_tag,
             container_name,
+            display_progress: false,
         }
     }
 
-    pub fn workdir<T: AsRef<Path>>(&mut self, path: T) {
+    pub fn workdir<T: AsRef<Path>>(mut self, path: T) -> Self {
         self.workdir_path = path.as_ref().to_path_buf();
+        self
+    }
+
+    pub fn display_progress(mut self, b: bool) -> Self {
+        self.display_progress = b;
+        self
     }
 
     pub fn download(&self) -> Result<()> {
@@ -65,9 +73,13 @@ impl Image {
         create_dir_all(&self.workdir_path)
             .with_context(|| format!("Failed to create: {}", workdir.display()))?;
 
-        let layers =
-            ImageDownloader::new(&self.image_name, &self.image_tag, &self.image_path, workdir)
-                .download_from_dockerhub()?;
+        let mut image_downloader =
+            ImageDownloader::new(&self.image_name, &self.image_tag, &self.image_path, workdir);
+        if self.display_progress {
+            image_downloader.pre_download_display(display_pre_download);
+            image_downloader.post_download_display(display_post_download);
+        }
+        let layers = image_downloader.download_from_dockerhub()?;
         ImageMerger::new(&self.image_path)
             .add_layers(layers)
             .merge()?;
@@ -131,4 +143,16 @@ impl ContainerImage for Image {
     fn need_userns(&self) -> bool {
         true
     }
+}
+
+fn display_pre_download(name: &str, tag: &str) {
+    println!("Download container image: {}:{} ", name, tag);
+}
+
+fn display_post_download(num_of_layer: usize, downloaded_layer: usize) {
+    if downloaded_layer == 0 {
+        println!();
+    }
+    print!("\r\x1b[1A\x1b[K");
+    println!("{}/{} layer has downloaded", downloaded_layer, num_of_layer);
 }

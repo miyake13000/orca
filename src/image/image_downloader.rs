@@ -14,6 +14,8 @@ use std::fmt::Display;
 use std::fs::create_dir_all;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 use tar::Archive;
 
 #[derive(Serialize, Deserialize)]
@@ -49,6 +51,8 @@ pub struct ImageDownloader {
     image_tag: String,
     store_path: PathBuf,
     workdir_prefix: PathBuf,
+    pre_download_fn: Option<fn(&str, &str)>,
+    post_download_fn: Option<fn(usize, usize)>,
 }
 
 impl ImageDownloader {
@@ -69,10 +73,26 @@ impl ImageDownloader {
             image_tag: image_tag.to_string(),
             store_path: store_path.as_ref().to_path_buf(),
             workdir_prefix: workdir_prefix.as_ref().to_path_buf(),
+            pre_download_fn: None,
+            post_download_fn: None,
         }
     }
 
-    pub fn download_from_dockerhub(&self) -> Result<Vec<PathBuf>> {
+    pub fn pre_download_display(&mut self, f: fn(&str, &str)) -> &mut Self {
+        self.pre_download_fn = Some(f);
+        self
+    }
+
+    pub fn post_download_display(&mut self, f: fn(usize, usize)) -> &mut Self {
+        self.post_download_fn = Some(f);
+        self
+    }
+
+    pub fn download_from_dockerhub(self) -> Result<Vec<PathBuf>> {
+        if let Some(f) = self.pre_download_fn {
+            f(&self.image_name, &self.image_tag);
+        }
+
         let token_url = format!(
             "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{}:pull",
             self.image_name
@@ -98,18 +118,45 @@ impl ImageDownloader {
             )
         })?;
 
-        let mut layers: Vec<PathBuf> = Vec::new();
+        let mut threads: Vec<JoinHandle<Result<PathBuf>>> = Vec::new();
+        let token = Arc::new(token);
+        let num_of_layer: usize = layer_ids.len();
+
+        if let Some(f) = self.post_download_fn {
+            f(num_of_layer, 0);
+        }
+
         for (i, layer_id) in layer_ids.iter().enumerate() {
+            let token = Arc::clone(&token);
+            let layer_id = layer_id.clone();
             let dir_name = format!("image_{}", i);
             let store_path = self.workdir_prefix.clone().join(dir_name);
             let image_url = format!(
                 "https://registry-1.docker.io/v2/{}/blobs/{}",
                 self.image_name, layer_id
             );
-            let layer_tar_gz = download_layer_tarball(&image_url, &token)?;
-            extract(layer_tar_gz, &store_path)?;
+
+            let join_handle = thread::spawn(move || {
+                let layer_tar_gz = download_layer_tarball(&image_url, token)?;
+                extract(layer_tar_gz, &store_path)?;
+                Ok(store_path)
+            });
+
+            threads.push(join_handle);
+        }
+
+        let mut layers: Vec<PathBuf> = Vec::new();
+        for (i, thread) in threads.into_iter().enumerate() {
+            let store_path = match thread.join() {
+                Ok(res) => res?,
+                Err(_) => bail!("Thread has abended"),
+            };
+            if let Some(f) = self.post_download_fn {
+                f(num_of_layer, i + 1);
+            }
             layers.push(store_path);
         }
+
         Ok(layers)
     }
 }

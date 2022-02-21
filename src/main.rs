@@ -39,15 +39,15 @@ fn main() -> Result<()> {
 
     let image_root = home_dir().unwrap().join(".local").join("orca");
 
-    let image = Image::new(image_root, image_name, image_tag, container_name);
+    let image = Image::new(image_root, image_name, image_tag, container_name)
+        .workdir("/tmp/orca/image")
+        .display_progress(true);
 
     if args.init_flag && image.exists_container() {
         print!("Removing old image");
         image.remove_container()?;
     }
     if !image.exists_image() {
-        println!("Downloading image");
-        println!("This may take a few minute");
         image.download()?;
     }
     if !image.exists_container() {
