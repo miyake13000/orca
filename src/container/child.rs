@@ -137,16 +137,14 @@ impl Initializer {
         Ok(())
     }
 
-    pub fn copy_resolv_conf() -> Result<()> {
-        let host_resolvconf: PathBuf = PathBuf::from("/")
-            .join(OLDROOT_NAME)
-            .join("etc/resolv.conf");
-        let resolvconf = Path::new("/etc/resolv.conf");
-        copy(host_resolvconf.as_path(), resolvconf).with_context(|| {
+    pub fn copy_resolv_conf(image_root: PathBuf) -> Result<()> {
+        let container_resolvconf: PathBuf = image_root.join("etc/resolv.conf");
+        let host_resolvconf = Path::new("/etc/resolv.conf");
+        copy(host_resolvconf, container_resolvconf.as_path()).with_context(|| {
             format!(
                 "Failed to copy '{}' to '{}'",
-                resolvconf.display(),
-                resolvconf.display()
+                host_resolvconf.display(),
+                container_resolvconf.display()
             )
         })?;
         Ok(())

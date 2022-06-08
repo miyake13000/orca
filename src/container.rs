@@ -88,6 +88,9 @@ where
     Initializer::wait_for_mapping_id()
         .context(error_message)
         .or_exit();
+    Initializer::copy_resolv_conf(image.image_root())
+        .context(error_message)
+        .or_exit();
     image.mount().context(error_message).or_exit();
     Initializer::pivot_root(image.image_root())
         .context(error_message)
@@ -96,9 +99,6 @@ where
         .context(error_message)
         .or_exit();
     Initializer::create_ptmx_link()
-        .context(error_message)
-        .or_exit();
-    Initializer::copy_resolv_conf()
         .context(error_message)
         .or_exit();
     Initializer::set_hostname(image.container_name())
