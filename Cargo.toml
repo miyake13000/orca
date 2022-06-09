@@ -1,6 +1,6 @@
 [package]
 name = "orca"
-version = "0.3.1"
+version = "0.3.2"
 authors = ["nomlab <https://github.com/nomlab>"]
 edition = "2021"
 description = "Lightweight Container Management Tool written by Rust"
