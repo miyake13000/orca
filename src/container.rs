@@ -3,7 +3,7 @@ mod parent;
 mod terminal;
 
 use crate::command::Command;
-use crate::image::{ContainerImage, Image};
+use crate::image::ContainerImage;
 use crate::OrExit;
 use crate::STACK_SIZE;
 use anyhow::{Context, Result};
@@ -14,20 +14,23 @@ use parent::io_connector::IoConnector;
 use std::ffi::CStr;
 use terminal::Terminal;
 
-pub struct Container {
-    image: Image,
+pub struct Container<T> {
+    image: T,
     child_pid: Pid,
     io_connector: Option<IoConnector>,
     terminal: Terminal,
 }
 
-impl Container {
+impl<T: ContainerImage> Container<T> {
     pub fn new(
-        image: Image,
+        image: T,
         command: String,
         cmd_args: Option<Vec<String>>,
         netns_flag: bool,
-    ) -> Result<Self> {
+    ) -> Result<Self>
+    where
+        T: ContainerImage,
+    {
         let stack: &mut [u8; STACK_SIZE] = &mut [0; STACK_SIZE];
         let cb = Box::new(|| child_main(&command, &cmd_args, &image));
         let signals = Some(libc::SIGCHLD);
@@ -67,7 +70,7 @@ impl Container {
         Ok(())
     }
 
-    pub fn wait(self) -> Result<Image> {
+    pub fn wait(self) -> Result<T> {
         wait().context("Failed to wait child process")?;
         if let Some(io_connector) = self.io_connector {
             io_connector.stop()?;
@@ -77,10 +80,11 @@ impl Container {
 }
 
 #[allow(clippy::needless_return)]
-fn child_main<T, U>(command: T, cmd_args: &Option<Vec<U>>, image: &Image) -> isize
+fn child_main<T, U, I>(command: T, cmd_args: &Option<Vec<U>>, image: &I) -> isize
 where
     T: AsRef<str>,
     U: AsRef<str> + Clone,
+    I: ContainerImage,
 {
     use child::Initializer;
     let error_message = "Failed to initialize container";
@@ -88,11 +92,11 @@ where
     Initializer::wait_for_mapping_id()
         .context(error_message)
         .or_exit();
-    Initializer::copy_resolv_conf(image.image_root())
+    Initializer::copy_resolv_conf(image.root_path())
         .context(error_message)
         .or_exit();
     image.mount().context(error_message).or_exit();
-    Initializer::pivot_root(image.image_root())
+    Initializer::pivot_root(image.root_path())
         .context(error_message)
         .or_exit();
     Initializer::mount_mandatory_files()
@@ -101,7 +105,7 @@ where
     Initializer::create_ptmx_link()
         .context(error_message)
         .or_exit();
-    Initializer::set_hostname(image.container_name())
+    Initializer::set_hostname(image.name())
         .context(error_message)
         .or_exit();
     Initializer::connect_tty().context(error_message).or_exit();

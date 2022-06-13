@@ -5,7 +5,7 @@ use anyhow::Result;
 use dirs::home_dir;
 use orca::args::Args;
 use orca::container::Container;
-use orca::image::Image;
+use orca::image::guest_image::GuestImage;
 
 fn main() -> Result<()> {
     let default_image_name = String::from("debian");
@@ -39,7 +39,7 @@ fn main() -> Result<()> {
 
     let image_root = home_dir().unwrap().join(".local").join("orca");
 
-    let image = Image::new(image_root, image_name, image_tag, container_name)
+    let image = GuestImage::new(image_root, image_name, image_tag, container_name)
         .workdir("/tmp/orca/image")
         .display_progress(true);
 
