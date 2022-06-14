@@ -1,9 +1,11 @@
 pub mod guest_image;
+pub mod host_image;
 
 use crate::mount::{FileType, Mount, MountFlags};
 use anyhow::{Context, Result};
 use guest_image::GuestImage;
-use std::path::PathBuf;
+use host_image::HostImage;
+use std::path::{Path, PathBuf};
 
 pub trait ContainerImage {
     fn mount(&self) -> Result<()>;
@@ -35,5 +37,31 @@ impl ContainerImage for GuestImage {
 
     fn need_userns(&self) -> bool {
         true
+    }
+}
+
+impl ContainerImage for HostImage {
+    fn mount(&self) -> Result<()> {
+        Mount::new(&self.container_path(), FileType::Dir)
+            .flags(MountFlags::MS_PRIVATE)
+            .flags(MountFlags::MS_REC)
+            .data(format!(
+                "lowerdir=/,upperdir={},workdir={}",
+                &self.ovr_upperdir.display(),
+                &self.ovr_workdir.display()
+            ))
+            .mount()
+    }
+
+    fn name(&self) -> String {
+        self.container_name()
+    }
+
+    fn root_path(&self) -> PathBuf {
+        self.container_path()
+    }
+
+    fn need_userns(&self) -> bool {
+        false
     }
 }
