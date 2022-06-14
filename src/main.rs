@@ -6,6 +6,7 @@ use dirs::home_dir;
 use orca::args::Args;
 use orca::container::Container;
 use orca::image::guest_image::GuestImage;
+use orca::image::host_image::HostImage;
 
 fn main() -> Result<()> {
     let default_image_name = String::from("debian");
@@ -39,31 +40,55 @@ fn main() -> Result<()> {
 
     let image_root = home_dir().unwrap().join(".local").join("orca");
 
-    let image = GuestImage::new(image_root, image_name, image_tag, container_name)
-        .workdir("/tmp/orca/image")
-        .display_progress(true);
+    if args.host_image {
+        let image = HostImage::new(image_root, container_name);
 
-    if args.init_flag && image.exists_container() {
-        print!("Removing old image");
-        image.remove_container()?;
-    }
-    if !image.exists_image() {
-        image.download()?;
-    }
-    if !image.exists_container() {
-        println!("Creating container");
-        image.create_container_image()?;
+        if args.init_flag && image.exists_container() {
+            print!("Removing old image");
+            image.remove_container()?;
+        }
+        if !image.exists_container() {
+            println!("Creating container");
+            image.create()?;
+        } else {
+            println!("Enter image already exists")
+        }
+
+        let mut working_container = Container::new(image, command, args.cmd_args, args.netns_flag)?;
+        working_container.connect_tty()?;
+
+        let used_image = working_container.wait()?;
+
+        if args.remove_flag {
+            used_image.remove_container()?;
+        }
     } else {
-        println!("Enter image already exists")
-    }
+        let image = GuestImage::new(image_root, image_name, image_tag, container_name)
+            .workdir("/tmp/orca/image")
+            .display_progress(true);
 
-    let mut working_container = Container::new(image, command, args.cmd_args, args.netns_flag)?;
-    working_container.connect_tty()?;
+        if !image.exists_image() {
+            image.download()?;
+        }
+        if args.init_flag && image.exists_container() {
+            print!("Removing old image");
+            image.remove_container()?;
+        }
+        if !image.exists_container() {
+            println!("Creating container");
+            image.create_container_image()?;
+        } else {
+            println!("Enter image already exists")
+        }
 
-    let used_image = working_container.wait()?;
+        let mut working_container = Container::new(image, command, args.cmd_args, args.netns_flag)?;
+        working_container.connect_tty()?;
 
-    if args.remove_flag {
-        used_image.remove_container()?;
+        let used_image = working_container.wait()?;
+
+        if args.remove_flag {
+            used_image.remove_container()?;
+        }
     }
 
     Ok(())
