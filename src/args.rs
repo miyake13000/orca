@@ -2,6 +2,7 @@ use clap::{crate_authors, crate_description, crate_name, crate_version};
 use clap::{App, AppSettings, Arg};
 
 pub struct Args {
+    pub host_image: bool,
     pub image_name: Option<String>,
     pub image_tag: Option<String>,
     pub container_name: Option<String>,
@@ -15,6 +16,7 @@ pub struct Args {
 impl Args {
     pub fn new() -> Args {
         Args {
+            host_image: true,
             image_name: None,
             image_tag: None,
             container_name: None,
@@ -33,6 +35,9 @@ impl Args {
             .author(crate_authors!())
             .about(crate_description!())
             .usage("orca [FLAGS] [OPTIONS] [COMMAND [ARGS..]]")
+            .arg(Arg::with_name("host").short("H").long("host-image").help(
+                "Use Host Image.\nIf this option sets, 'image' and 'tag' options are discarded.",
+            ))
             .arg(
                 Arg::with_name("image")
                     .short("i")
@@ -72,6 +77,7 @@ impl Args {
 
         let matches = app.get_matches();
 
+        self.host_image = matches.is_present("host");
         if let Some(o) = matches.value_of("image") {
             self.image_name = Some(o.to_string());
         }
