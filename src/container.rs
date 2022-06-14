@@ -38,8 +38,11 @@ impl<T: ContainerImage> Container<T> {
         let mut flags = CloneFlags::CLONE_NEWNS
             | CloneFlags::CLONE_NEWUTS
             | CloneFlags::CLONE_NEWIPC
-            | CloneFlags::CLONE_NEWPID
-            | CloneFlags::CLONE_NEWUSER;
+            | CloneFlags::CLONE_NEWPID;
+
+        if image.need_userns() {
+            flags.insert(CloneFlags::CLONE_NEWUSER);
+        }
         if netns_flag {
             flags.insert(CloneFlags::CLONE_NEWNET);
         }
@@ -47,10 +50,12 @@ impl<T: ContainerImage> Container<T> {
         let child_pid =
             clone(cb, stack, flags, signals).context("Failed to clone child process")?;
 
-        if Command::new("newuidmap", Option::<Vec<String>>::None).is_exist() {
-            parent::Initilizer::map_id_with_subuid(child_pid)?;
-        } else {
-            parent::Initilizer::map_id(child_pid)?;
+        if image.need_userns() {
+            if Command::new("newuidmap", Option::<Vec<String>>::None).is_exist() {
+                parent::Initilizer::map_id_with_subuid(child_pid)?;
+            } else {
+                parent::Initilizer::map_id(child_pid)?;
+            }
         }
 
         let terminal = Terminal::new()?;
@@ -89,9 +94,11 @@ where
     use child::Initializer;
     let error_message = "Failed to initialize container";
 
-    Initializer::wait_for_mapping_id()
-        .context(error_message)
-        .or_exit();
+    if image.need_userns() {
+        Initializer::wait_for_mapping_id()
+            .context(error_message)
+            .or_exit();
+    }
     Initializer::copy_resolv_conf(image.root_path())
         .context(error_message)
         .or_exit();
@@ -105,9 +112,11 @@ where
     Initializer::create_ptmx_link()
         .context(error_message)
         .or_exit();
-    Initializer::set_hostname(image.name())
-        .context(error_message)
-        .or_exit();
+    if image.need_userns() {
+        Initializer::set_hostname(image.name())
+            .context(error_message)
+            .or_exit();
+    }
     Initializer::connect_tty().context(error_message).or_exit();
     Initializer::unmount_old_root()
         .context(error_message)
