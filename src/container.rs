@@ -9,14 +9,12 @@ use crate::STACK_SIZE;
 use anyhow::{Context, Result};
 use nix::sched::{clone, CloneFlags};
 use nix::sys::wait::wait;
-use nix::unistd::Pid;
 use parent::io_connector::IoConnector;
 use std::ffi::CStr;
 use terminal::Terminal;
 
 pub struct Container<T> {
     image: T,
-    child_pid: Pid,
     io_connector: Option<IoConnector>,
     terminal: Terminal,
 }
@@ -64,7 +62,6 @@ impl<T: ContainerImage> Container<T> {
 
         Ok(Container {
             image,
-            child_pid,
             io_connector: None,
             terminal,
         })
