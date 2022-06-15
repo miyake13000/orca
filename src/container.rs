@@ -58,6 +58,8 @@ impl<T: ContainerImage> Container<T> {
             }
         }
 
+        parent::Initilizer::setns(child_pid, flags).context("Failed to enter namespace")?;
+
         let terminal = Terminal::new()?;
 
         Ok(Container {
@@ -69,7 +71,7 @@ impl<T: ContainerImage> Container<T> {
     }
 
     pub fn connect_tty(&mut self) -> Result<()> {
-        self.io_connector = Some(parent::Initilizer::connect_tty(self.child_pid)?);
+        self.io_connector = Some(parent::Initilizer::connect_tty()?);
         self.terminal.make_raw_mode()?;
 
         Ok(())

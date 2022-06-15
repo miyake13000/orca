@@ -16,6 +16,28 @@ use std::os::unix::io::AsRawFd;
 pub struct Initilizer;
 
 impl Initilizer {
+    pub fn setns(child_pid: Pid, clone_flags: CloneFlags) -> Result<()> {
+        let raw_child_pid = child_pid.as_raw() as isize;
+
+        if clone_flags.contains(CloneFlags::CLONE_NEWUSER) {
+            let userns_filename = format!("/proc/{}/ns/user", raw_child_pid);
+            let userns = File::open(&userns_filename)
+                .with_context(|| format!("Failed to open '{}", userns_filename))?;
+            let userns_fd = userns.as_raw_fd();
+            sched::setns(userns_fd, CloneFlags::CLONE_NEWUSER)
+                .context("Failed to setns to userns")?;
+        }
+
+        if clone_flags.contains(CloneFlags::CLONE_NEWUSER) {
+            let mntns_filename = format!("/proc/{}/ns/mnt", raw_child_pid);
+            let mntns = File::open(&mntns_filename)
+                .with_context(|| format!("Failed to open '{}", mntns_filename))?;
+            let mntns_fd = mntns.as_raw_fd();
+            sched::setns(mntns_fd, CloneFlags::CLONE_NEWNS).context("Failed to setns to mntns")?;
+        }
+
+        Ok(())
+    }
     pub fn map_id(child_pid: Pid) -> Result<()> {
         let mapping_uid = MappingID::create(IDType::UID)?;
         let mapping_gid = MappingID::create(IDType::GID)?;
@@ -78,8 +100,7 @@ impl Initilizer {
         Ok(())
     }
 
-    pub fn connect_tty(child_pid: Pid) -> Result<IoConnector> {
-        setns(child_pid).context("Faield to setns")?;
+    pub fn connect_tty() -> Result<IoConnector> {
         let pty_master_path = "/dev/pts/ptmx";
 
         let pty_master = retry(Fixed::from_millis(50).take(20), || {
@@ -105,24 +126,4 @@ impl Initilizer {
             pty_master,
         ))
     }
-}
-
-fn setns(child_pid: Pid) -> Result<()> {
-    let raw_child_pid = child_pid.as_raw() as isize;
-
-    let userns_filename = format!("/proc/{}/ns/user", raw_child_pid);
-    let mntns_filename = format!("/proc/{}/ns/mnt", raw_child_pid);
-
-    let userns = File::open(&userns_filename)
-        .with_context(|| format!("Failed to open '{}", userns_filename))?;
-    let mntns = File::open(&mntns_filename)
-        .with_context(|| format!("Failed to open '{}", mntns_filename))?;
-
-    let userns_fd = userns.as_raw_fd();
-    let mntns_fd = mntns.as_raw_fd();
-
-    sched::setns(userns_fd, CloneFlags::CLONE_NEWUSER).context("Failed to setns to userns")?;
-    sched::setns(mntns_fd, CloneFlags::CLONE_NEWNS).context("Failed to setns to mntns")?;
-
-    Ok(())
 }
