@@ -43,13 +43,17 @@ impl ContainerImage for GuestImage {
 impl ContainerImage for HostImage {
     fn mount(&self) -> Result<()> {
         Mount::new(&self.container_path(), FileType::Dir)
+            .fs_type("overlay")
             .flags(MountFlags::MS_PRIVATE)
             .flags(MountFlags::MS_REC)
-            .data(format!(
-                "lowerdir=/,upperdir={},workdir={}",
-                &self.ovr_upperdir.display(),
-                &self.ovr_workdir.display()
-            ))
+            .data(
+                format!(
+                    "lowerdir=/,upperdir={},workdir={}",
+                    &self.ovr_upperdir.display(),
+                    &self.ovr_workdir.display()
+                )
+                .as_str(),
+            )
             .mount()
     }
 
