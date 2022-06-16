@@ -28,7 +28,7 @@ impl Initilizer {
                 .context("Failed to setns to userns")?;
         }
 
-        if clone_flags.contains(CloneFlags::CLONE_NEWUSER) {
+        if clone_flags.contains(CloneFlags::CLONE_NEWNS) {
             let mntns_filename = format!("/proc/{}/ns/mnt", raw_child_pid);
             let mntns = File::open(&mntns_filename)
                 .with_context(|| format!("Failed to open '{}", mntns_filename))?;
