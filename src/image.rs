@@ -5,7 +5,7 @@ use crate::mount::{FileType, Mount, MountFlags};
 use anyhow::{Context, Result};
 use guest_image::GuestImage;
 use host_image::HostImage;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub trait ContainerImage {
     fn mount(&self) -> Result<()>;
