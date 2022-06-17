@@ -12,6 +12,7 @@ use retry::{delay::Fixed, retry};
 use std::fs::File;
 use std::io::{stdin, stdout, Write};
 use std::os::unix::io::AsRawFd;
+use std::path::Path;
 
 pub struct Initilizer;
 
@@ -104,13 +105,25 @@ impl Initilizer {
         let pty_master_path = "/dev/pts/ptmx";
 
         let pty_master = retry(Fixed::from_millis(50).take(20), || {
-            nix::fcntl::open(
-                pty_master_path,
-                nix::fcntl::OFlag::O_RDWR,
-                nix::sys::stat::Mode::all(),
-            )
+            if Path::exists(Path::new("/dev/pts/0")) {
+                Err(anyhow!("Child process has not mounted devpts yet"))
+            } else {
+                nix::fcntl::open(
+                    pty_master_path,
+                    nix::fcntl::OFlag::O_RDWR,
+                    nix::sys::stat::Mode::all(),
+                )
+                .context("Child process has not connected tty yet")
+            }
         })
-        .with_context(|| format!("Failed to open '{}'", pty_master_path))?;
+        .map_err(|error| match error {
+            retry::Error::Operation {
+                error: e,
+                total_delay: _,
+                tries: _,
+            } => e,
+            retry::Error::Internal(str) => anyhow!(str),
+        })?;
 
         if unsafe { grantpt(pty_master) } < 0 {
             return Err(anyhow!("Failed to grantpt('{}')", pty_master_path));
