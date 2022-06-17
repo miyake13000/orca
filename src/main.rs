@@ -39,6 +39,7 @@ fn main() -> Result<()> {
     };
 
     let image_root = home_dir().unwrap().join(".local").join("orca");
+    let work_dir = image_root.join("tmp");
 
     if args.host_image {
         let image = HostImage::new(image_root, container_name);
@@ -54,7 +55,8 @@ fn main() -> Result<()> {
             println!("Enter image already exists")
         }
 
-        let mut working_container = Container::new(image, command, args.cmd_args, args.netns_flag)?;
+        let mut working_container =
+            Container::new(image, command, args.cmd_args, args.netns_flag, work_dir)?;
         working_container.connect_tty()?;
 
         let used_image = working_container.wait()?;
@@ -81,7 +83,8 @@ fn main() -> Result<()> {
             println!("Enter image already exists")
         }
 
-        let mut working_container = Container::new(image, command, args.cmd_args, args.netns_flag)?;
+        let mut working_container =
+            Container::new(image, command, args.cmd_args, args.netns_flag, work_dir)?;
         working_container.connect_tty()?;
 
         let used_image = working_container.wait()?;

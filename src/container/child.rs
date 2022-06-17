@@ -6,7 +6,7 @@ use nix::unistd;
 use nix::unistd::geteuid;
 use retry::{delay::Fixed, retry};
 use std::ffi::{CStr, CString};
-use std::fs::{self, copy};
+use std::fs::{self, copy, create_dir_all};
 use std::io::{stderr, stdin, stdout};
 use std::os::unix::fs::symlink;
 use std::os::unix::io::AsRawFd;
@@ -26,6 +26,19 @@ impl Initializer {
             }
         })
         .map_err(|_| anyhow!("Time out to wait for mapping UID"))
+    }
+
+    pub fn store_resolv_conf<T: AsRef<Path>>(temp_dir: T) -> Result<()> {
+        create_dir_all(temp_dir.as_ref())
+            .with_context(|| format!("Failed to mkdir '{}'", temp_dir.as_ref().display()))?;
+        let stored_resolvconf = PathBuf::from(temp_dir.as_ref()).join("resolv.conf");
+        copy("/etc/resolv.conf", stored_resolvconf).with_context(|| {
+            format!(
+                "Failed to copy '/etc/resolv.conf' to {}",
+                temp_dir.as_ref().display()
+            )
+        })?;
+        Ok(())
     }
 
     pub fn pivot_root<T: Into<PathBuf>>(new_root: T) -> Result<()> {
@@ -137,14 +150,16 @@ impl Initializer {
         Ok(())
     }
 
-    pub fn copy_resolv_conf(image_root: PathBuf) -> Result<()> {
-        let container_resolvconf: PathBuf = image_root.join("etc/resolv.conf");
-        let host_resolvconf = Path::new("/etc/resolv.conf");
-        copy(host_resolvconf, container_resolvconf.as_path()).with_context(|| {
+    pub fn copy_resolv_conf<T: AsRef<Path>>(stored_dir: T) -> Result<()> {
+        let stored_dir = PathBuf::from(stored_dir.as_ref());
+        let stored_resolvconf = stored_dir.strip_prefix("/")?.join("resolv.conf");
+        let stored_resolvconf = PathBuf::from("/").join("oldroot").join(stored_resolvconf);
+        let resolvconf_path = "/etc/resolv.conf";
+        copy(stored_resolvconf.as_path(), resolvconf_path).with_context(|| {
             format!(
                 "Failed to copy '{}' to '{}'",
-                host_resolvconf.display(),
-                container_resolvconf.display()
+                stored_resolvconf.display(),
+                resolvconf_path
             )
         })?;
         Ok(())

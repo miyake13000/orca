@@ -11,6 +11,7 @@ use nix::sched::{clone, CloneFlags};
 use nix::sys::wait::wait;
 use parent::io_connector::IoConnector;
 use std::ffi::CStr;
+use std::path::Path;
 use terminal::Terminal;
 
 pub struct Container<T> {
@@ -20,17 +21,19 @@ pub struct Container<T> {
 }
 
 impl<T: ContainerImage> Container<T> {
-    pub fn new(
+    pub fn new<P>(
         image: T,
         command: String,
         cmd_args: Option<Vec<String>>,
         netns_flag: bool,
+        work_dir: P,
     ) -> Result<Self>
     where
         T: ContainerImage,
+        P: AsRef<Path>,
     {
         let stack: &mut [u8; STACK_SIZE] = &mut [0; STACK_SIZE];
-        let cb = Box::new(|| child_main(&command, &cmd_args, &image));
+        let cb = Box::new(|| child_main(&command, &cmd_args, &image, work_dir.as_ref()));
         let signals = Some(libc::SIGCHLD);
 
         let mut flags = CloneFlags::CLONE_NEWNS
@@ -84,7 +87,7 @@ impl<T: ContainerImage> Container<T> {
 }
 
 #[allow(clippy::needless_return)]
-fn child_main<T, U, I>(command: T, cmd_args: &Option<Vec<U>>, image: &I) -> isize
+fn child_main<T, U, I>(command: T, cmd_args: &Option<Vec<U>>, image: &I, work_dir: &Path) -> isize
 where
     T: AsRef<str>,
     U: AsRef<str> + Clone,
@@ -98,7 +101,7 @@ where
             .context(error_message)
             .or_exit();
     }
-    Initializer::copy_resolv_conf(image.root_path())
+    Initializer::store_resolv_conf(work_dir)
         .context(error_message)
         .or_exit();
     image.mount().context(error_message).or_exit();
@@ -106,6 +109,9 @@ where
         .context(error_message)
         .or_exit();
     Initializer::mount_mandatory_files()
+        .context(error_message)
+        .or_exit();
+    Initializer::copy_resolv_conf(work_dir)
         .context(error_message)
         .or_exit();
     Initializer::create_ptmx_link()
