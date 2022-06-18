@@ -42,10 +42,14 @@ impl ContainerImage for GuestImage {
 
 impl ContainerImage for HostImage {
     fn mount(&self) -> Result<()> {
+        Mount::<_, &str>::new("/", FileType::Dir)
+            .add_flags(MountFlags::MS_PRIVATE)
+            .add_flags(MountFlags::MS_REC)
+            .mount()
+            .context("Failed to make '/' private")?;
+
         Mount::new(&self.container_path(), FileType::Dir)
             .fs_type("overlay")
-            .flags(MountFlags::MS_PRIVATE)
-            .flags(MountFlags::MS_REC)
             .data(
                 format!(
                     "lowerdir=/,upperdir={},workdir={}",
