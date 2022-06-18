@@ -1,7 +1,11 @@
 # orca
 
 ## Summary
-Lightweight rootless container management tool
+Lightweight container management tool
+
+orca creates container from
+1. Container Image in DockerHub (not need root)
+2. host's root filesystem (need root)
 
 ## Prerequisities
 ### Debian or Arch Linux
@@ -19,7 +23,14 @@ If uidmap is not installed, you cannot create new user in container.
 1. `$ sudo apt install uidmap`
 
 ## How to use
-1. `$ ./orca -d hello-world -t latest /hello`
+1. Use Container Image
+   ```bash
+   $ ./orca -d hello-world -t latest /hello
+   ```
+2. Use Host Image
+    ```bash
+    $ sudo ./orca -H bash
+    ```
 
 ## Uninstall
 1. `rm ./orca`
