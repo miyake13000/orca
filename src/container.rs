@@ -10,7 +10,10 @@ use anyhow::{Context, Result};
 use nix::sched::{clone, CloneFlags};
 use nix::sys::wait::wait;
 use parent::io_connector::IoConnector;
+use retry::{delay::Fixed, retry};
 use std::ffi::CStr;
+use std::io::stdin;
+use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use terminal::Terminal;
 
@@ -61,7 +64,7 @@ impl<T: ContainerImage> Container<T> {
 
         parent::Initilizer::setns(child_pid, flags).context("Failed to enter namespace")?;
 
-        let terminal = Terminal::new()?;
+        let terminal = Terminal::new(stdin().as_raw_fd())?;
 
         Ok(Container {
             image,
@@ -72,6 +75,23 @@ impl<T: ContainerImage> Container<T> {
 
     pub fn connect_tty(&mut self) -> Result<()> {
         self.io_connector = Some(parent::Initilizer::connect_tty()?);
+        let win_size = self
+            .terminal
+            .get_win_size()
+            .context("Failed to get current window size")?;
+        let pty_slave = retry(Fixed::from_millis(10).take(100), || {
+            nix::fcntl::open(
+                "/dev/pts/0",
+                nix::fcntl::OFlag::O_RDWR,
+                nix::sys::stat::Mode::empty(),
+            )
+        })
+        .context("Failed to open /dev/pts/0")?;
+
+        Terminal::new(pty_slave)
+            .context("Failed to open pty_slave")?
+            .set_win_size(win_size)
+            .context("Failed to set window size")?;
         self.terminal.make_raw_mode()?;
 
         Ok(())
