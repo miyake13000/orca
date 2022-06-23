@@ -13,8 +13,9 @@ Execute below command to be able to separate user_namespace with non-root user.
 1. `$ sudo sysctl -w kernel.unprivileged_userns_clone=1`
 
 ## Install orca
-### Linux
-1. `$ curl -L https://github.com/miyake13000/orca/releases/latest/download/orca > orca`
+Download orca from [release page](https://github.com/miyake13000/orca/releases/latest).
+Or execute below command to download command-line.
+1. `$ curl -L https://github.com/miyake13000/orca/releases/latest/download/orca_x86_64-unknown-linux-gnu > orca`
 2. `$ chmod +x ./orca`
 
 ### Optional
@@ -34,17 +35,22 @@ If uidmap is not installed, you cannot create new user in container.
 
 ## Uninstall
 1. `rm ./orca`
-2. `rm -rf $HOME/.local/orca`
+2. `rm -rf $HOME/.local/share/orca`
 
-## Build static linked binary
-1. Execute below commands at once to build static linked openssl
-    1. `sudo apt install musl-tools gcc openssl`
-    2. `sudo bash ibuild_static_openssl.sh`
+## Build from source
+### normal build
+1. Install [Rust](https://www.rust-lang.org/tools/install)
+2. Build orca
+    ```bash
+    $ cargo build --release
+    ```
+3. orca is placed 'target/{default target name}/release/orca'
 
-2. Install rust and MUSL
-    1. Install Rust from [Rust homepage](https://www.rust-lang.org/tools/install)
-    2. `$ rustup target add x86_64-unknown-linux-musl`
-
-3. Build static linked binary
-    1. `$ bash create_static_binary.sh`
+### staticaly linked build
+1. Install [docker](https://docs.docker.com/engine/install/)
+2. Build orca
+   ```bash
+    $ ./static_build.sh
+    ```
+3. orca is placed 'target/x86_64-unknown-linux-musl/release/orca'
 
