@@ -38,7 +38,11 @@ fn main() -> Result<()> {
         default_command
     };
 
-    let image_root = home_dir().unwrap().join(".local").join("orca");
+    let image_root = home_dir()
+        .unwrap()
+        .join(".local")
+        .join("share")
+        .join("orca");
     let work_dir = image_root.join("tmp");
 
     if args.host_image {
