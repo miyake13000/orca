@@ -1,50 +1,106 @@
 # orca
+Sandbox version control system
 
 ## Summary
-orca is lightweight container management tool
+Orca creates sandboxes from
+1. host's filesystem
+2. container (DockerHub)  
+and version control both host and container environment (by versioning entire filesystem with OverlayFS)
 
-orca creates container from
-1. Container Image in DockerHub (not require root)
-2. host's root filesystem (require root)
-
-## Prerequisities
-### Debian or Arch Linux
-Execute below command to be able to separate user_namespace with non-root user.  
-1. `$ sudo sysctl -w kernel.unprivileged_userns_clone=1`
+Read [mechanism](docs/mechanism.md) for more information.
 
 ## Install orca
 Download orca from [release page](https://github.com/miyake13000/orca/releases/latest).
 Or execute below command to download command-line.
-1. `$ curl -L https://github.com/miyake13000/orca/releases/latest/download/orca > orca`
-2. `$ chmod +x ./orca`
+```bash
+$ wget https://github.com/miyake13000/orca/releases/latest/download/orca
+$ chmod +x ./orca
+```
 
 ### Optional
-We recommend to install uidmap package.  
-If uidmap is not installed, you cannot create new user in container.  
-1. `$ sudo apt install uidmap`
+Orca needs root priviledge, so make orca available with sudo.
+```bash
+$ sudo mv ./orca /usr/bin/
+```
+Or, setuid to orca
+```bash
+$ sudo chmod 6755 ./orca
+```
 
 ## How to use
-1. Use Container Image
+1. Initialize (once)
    ```bash
-   $ ./orca -d hello-world -t latest /hello # create container from hello-world:latest image
+   $ orca init # Use host envrionment
    ```
-2. Use Host Image  
-You want to chack if the compilation of vim works correctry, but you want not to leave garbage files created with the compilation.
-In this case, orca just fits this need.
+   Or, you can use container image
+   ```bash
+   $ orca init --image ubuntu:22.04 --name ubuntu-test
+   ```
+2. Run orca
     ```bash
-    $ sudo ./orca -H su - miyake # create container and switch user to miyake
-    $ git clone https://github.com/vim/vim.git # you are already in container
-    $ ls 
-    vim other_files
-    $ cd vim && make install
-    $ exit # leave container
-    $ ls
-    other_files
+    # current files: example.c
+    $ orca run # Enter sandbox
+    $ apt update && apt install -y clang
+    $ clang -o example example.c
+    # current files: example example.c
+    $ ./example
+    $ exit # Exit from sandbox
+    # current files: example.c
+    ```
+    Or, you can use container image created orca init
+    ```bash
+    $ orca --name ubuntu-test run
+    $ apt update && apt install -y clang
+    $ clang -o example example.c
+    ```
+3. Commit environment
+    ```bash
+    $ orca commit --message "Install clang"
+    $ orca log
+    commit: 8dfb0a6c3c943d14ab4cf745d1c761cc6f386219
+      date: 2024-05-03 10:46:11.868560348 +09:00
+      message: Install clang
+    ```
+4. Create branch
+    ```bash
+    $ orca branch libc
+    $ orca checkout libc
+    $ orca run bash -c "apt update && apt install -y 2.35-0ubuntu3"
+    $ orca run gcc -o example example.com
+    $ orca log
+    commit: 408dfdc46bb489eafbf6e38acbeae7656d0c31ec
+      date: 2024-05-03 10:49:25.145348653 +09:00
+      message: Downgrade libc
+
+    commit: 8dfb0a6c3c943d14ab4cf745d1c761cc6f386219
+      date: 2024-05-03 10:46:11.868560348 +09:00
+      message: Install clang
+    ```
+6. Merge branch
+    ```bash
+    $ orca checkout main
+    $ orca merge libc
+    $ orca log
+    commit: 408dfdc46bb489eafbf6e38acbeae7656d0c31ec
+      date: 2024-05-03 10:49:25.145348653 +09:00
+      message: Downgrade libc
+
+    commit: 8dfb0a6c3c943d14ab4cf745d1c761cc6f386219
+      date: 2024-05-03 10:46:11.868560348 +09:00
+      message: Install clang
+    ```
+7. Reset commit
+    ```bash
+    $ orca reset 8dfb0a
+    $ orca log
+    commit: 8dfb0a6c3c943d14ab4cf745d1c761cc6f386219
+      date: 2024-05-03 10:46:11.868560348 +09:00
+      message: Install clang
     ```
 
 ## Uninstall
-1. `rm ./orca`
-2. `rm -rf $HOME/.local/share/orca`
+1. `sudo rm $(which orca)`
+2. `sudo rm -rf $HOME/.local/share/orca`
 
 ## Build from source
 ### normal build
