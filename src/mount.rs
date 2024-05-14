@@ -1,8 +1,7 @@
 use anyhow::{bail, Context, Result};
 use nix::mount::{MntFlags, MsFlags};
-use rm_rf::remove;
-use std::fs::{create_dir_all, File};
-use std::path::Path;
+use std::fs::{create_dir_all, remove_dir_all, File};
+use std::path::{Path, PathBuf};
 
 #[derive(Eq, PartialEq, Ord, PartialOrd)]
 pub enum FileType {
@@ -22,24 +21,20 @@ impl FileType {
 
 pub type MountFlags = MsFlags;
 
-pub struct Mount<P1, P2> {
-    src: Option<P1>,
-    dest: P1,
-    fs_type: Option<P2>,
+pub struct Mount {
+    src: Option<PathBuf>,
+    dest: PathBuf,
+    fs_type: Option<String>,
     flags: MountFlags,
-    data: Option<P2>,
+    data: Option<String>,
     file_type: FileType,
 }
 
-impl<P1, P2> Mount<P1, P2>
-where
-    P1: AsRef<Path>,
-    P2: AsRef<str>,
-{
-    pub fn new(dest: P1, file_type: FileType) -> Self {
+impl Mount {
+    pub fn new<P: Into<PathBuf>>(dest: P, file_type: FileType) -> Self {
         Self {
             src: None,
-            dest,
+            dest: dest.into(),
             fs_type: None,
             flags: MountFlags::empty(),
             data: None,
@@ -47,18 +42,18 @@ where
         }
     }
 
-    pub fn src(mut self, src: P1) -> Self {
-        self.src = Some(src);
+    pub fn src<P: Into<PathBuf>>(mut self, src: P) -> Self {
+        self.src = Some(src.into());
         self
     }
 
-    pub fn fs_type(mut self, fs_type: P2) -> Self {
-        self.fs_type = Some(fs_type);
+    pub fn fs_type<S: ToString>(mut self, fs_type: S) -> Self {
+        self.fs_type = Some(fs_type.to_string());
         self
     }
 
-    pub fn data(mut self, data: P2) -> Self {
-        self.data = Some(data);
+    pub fn data<S: ToString>(mut self, data: S) -> Self {
+        self.data = Some(data.to_string());
         self
     }
 
@@ -73,31 +68,32 @@ where
     }
 
     pub fn mount(self) -> Result<()> {
-        let dest_path = self.dest.as_ref();
-        let metadata = dest_path.metadata();
-
-        if let Ok(dest_file_type) = metadata {
-            if self.file_type.is_dir() && !dest_file_type.is_dir() {
-                bail!("Cannot mount directory on file: {}", dest_path.display());
-            } else if self.file_type.is_file() && dest_file_type.is_dir() {
-                bail!("Cannot mount file on directory: {}", dest_path.display());
+        let dest_path = self.dest.as_path();
+        match dest_path.metadata() {
+            Ok(dest) => {
+                if self.file_type.is_dir() && !dest.is_dir() {
+                    bail!("Cannot mount directory on file: {}", dest_path.display());
+                } else if self.file_type.is_file() && dest.is_dir() {
+                    bail!("Cannot mount file on directory: {}", dest_path.display());
+                }
             }
-        } else if metadata.is_err() {
-            if self.file_type.is_file() {
-                File::create(dest_path)
-                    .with_context(|| format!("Failed to create '{}'", dest_path.display()))?;
-            } else {
-                create_dir_all(dest_path)
-                    .with_context(|| format!("Failed to create '{}'", dest_path.display()))?;
+            Err(_) => {
+                if self.file_type.is_file() {
+                    File::create(dest_path)
+                        .with_context(|| format!("Failed to create '{}'", dest_path.display()))?;
+                } else {
+                    create_dir_all(dest_path)
+                        .with_context(|| format!("Failed to create '{}'", dest_path.display()))?;
+                }
             }
         }
 
         nix::mount::mount(
-            self.src.as_ref().map(|o| o.as_ref()),
-            self.dest.as_ref(),
-            self.fs_type.as_ref().map(|o| o.as_ref()),
+            self.src.as_deref(),
+            self.dest.as_path(),
+            self.fs_type.as_deref(),
             self.flags,
-            self.data.as_ref().map(|o| o.as_ref()),
+            self.data.as_deref(),
         )?;
 
         Ok(())
@@ -127,7 +123,7 @@ impl<T: AsRef<Path>> UnMount<T> {
     }
 
     pub fn add_flag(mut self, flag: UnMountFlags) -> Self {
-        self.flags = self.flags | flag;
+        self.flags |= flag;
         self
     }
 
@@ -142,7 +138,7 @@ impl<T: AsRef<Path>> UnMount<T> {
 
         if self.remove_mount_point {
             if dest.is_file() || dest.is_dir() {
-                remove(dest)?;
+                remove_dir_all(dest)?;
             } else {
                 bail!("Cannot remove: '{}'", dest.display());
             }

@@ -1,118 +1,125 @@
-use clap::{crate_authors, crate_description, crate_name, crate_version};
-use clap::{App, AppSettings, Arg};
+use clap::{Args as ArgsDerive, Parser, Subcommand};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
-pub struct Args {
-    pub host_image: bool,
-    pub image_name: Option<String>,
-    pub image_tag: Option<String>,
-    pub container_name: Option<String>,
-    pub command: Option<String>,
-    pub cmd_args: Option<Vec<String>>,
-    pub init_flag: bool,
-    pub remove_flag: bool,
-    pub netns_flag: bool,
+fn default_rootdir<P: AsRef<Path>>(dir_name: P) -> PathBuf {
+    PathBuf::from(env::var("HOME").unwrap()).join(dir_name)
 }
 
-impl Args {
-    pub fn new() -> Args {
-        Args {
-            host_image: true,
-            image_name: None,
-            image_tag: None,
-            container_name: None,
-            command: None,
-            cmd_args: None,
-            init_flag: false,
-            remove_flag: false,
-            netns_flag: false,
-        }
-    }
+#[derive(Debug, Parser)]
+#[command(author, version, about)]
+pub struct Args {
+    /// List initialized environment
+    #[arg(short, long, default_value_t = false)]
+    pub list: bool,
 
-    pub fn set_args(&mut self) {
-        let app = App::new(crate_name!())
-            .setting(AppSettings::AllowExternalSubcommands)
-            .version(crate_version!())
-            .author(crate_authors!())
-            .about(crate_description!())
-            .usage("orca [FLAGS] [OPTIONS] [COMMAND [ARGS..]]")
-            .arg(Arg::with_name("host").short("H").long("host-image").help(
-                "Use Host Image.\nIf this option sets, 'image' and 'tag' options are discarded.",
-            ))
-            .arg(
-                Arg::with_name("image")
-                    .short("i")
-                    .long("image")
-                    .help("Image name of container image")
-                    .takes_value(true),
-            )
-            .arg(
-                Arg::with_name("tag")
-                    .short("t")
-                    .long("tag")
-                    .help("Tag name of container iamge")
-                    .takes_value(true),
-            )
-            .arg(
-                Arg::with_name("name")
-                    .short("n")
-                    .long("name")
-                    .help("Name of container")
-                    .takes_value(true),
-            )
-            .arg(
-                Arg::with_name("init")
-                    .long("init")
-                    .help("Initialize contaier image before running a command"),
-            )
-            .arg(
-                Arg::with_name("remove")
-                    .long("rm")
-                    .help("Remove container image after running a command"),
-            )
-            .arg(
-                Arg::with_name("use_netns")
-                    .long("use-netns")
-                    .help("Isolate network namespace"),
-            );
+    /// Use specified named environment created by 'init'
+    #[arg(short, long, default_value = "_default")]
+    pub name: String,
 
-        let matches = app.get_matches();
+    /// Root directory to save data [default: $HOME/.orca]
+    #[arg(short, long, hide_default_value = true, default_value = default_rootdir(".orca").into_os_string()) ]
+    pub root: String,
 
-        self.host_image = matches.is_present("host");
-        if let Some(o) = matches.value_of("image") {
-            self.image_name = Some(o.to_string());
-        }
-        if let Some(o) = matches.value_of("tag") {
-            self.image_tag = Some(o.to_string());
-        }
-        if let Some(o) = matches.value_of("name") {
-            self.container_name = Some(o.to_string());
-        }
-        self.init_flag = matches.is_present("init");
-        self.remove_flag = matches.is_present("remove");
-        self.netns_flag = matches.is_present("use_netns");
-        match matches.subcommand() {
-            (external, Some(arg_matches)) => {
-                let command = if external.is_empty() {
-                    None
-                } else {
-                    Some(external.to_string())
-                };
-                let args = if let Some(values) = arg_matches.values_of("") {
-                    Some(values.map(|arg| arg.to_string()).collect())
-                } else {
-                    None
-                };
-                self.command = command;
-                self.cmd_args = args;
-            }
-            (external, None) => {
-                let command = if external.is_empty() {
-                    None
-                } else {
-                    Some(external.to_string())
-                };
-                self.command = command;
-            }
-        };
-    }
+    #[command(subcommand)]
+    pub action: Action,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Action {
+    /// Initialize version controlled host environment
+    /// (If --image is set, use container insted of host)
+    Init(InitArgs),
+
+    /// Run command in version controlled environment
+    Run(RunArgs),
+
+    /// Show commit logs
+    Log(LogArgs),
+
+    /// Record changes
+    Commit(CommitArgs),
+
+    /// List, create, or delete branches
+    Branch(BranchArgs),
+
+    /// Join two branches together
+    Merge(TargetArgs),
+
+    /// Show changes between commits
+    Diff,
+
+    /// Delete uncommited chenges
+    Clean,
+
+    /// Reset current branch to specified commit
+    Reset(TargetArgs),
+
+    /// Switch branches
+    Checkout(TargetArgs),
+}
+
+#[derive(Debug, ArgsDerive)]
+pub struct InitArgs {
+    /// Use specified container image instead of Host image
+    #[arg(short, long)]
+    pub image: Option<String>,
+
+    /// Tag name of specified container image
+    #[arg(short, long, default_value = "latest")]
+    pub tag: String,
+
+    /// Assign a name to created environment
+    #[arg(short, long, default_value = "_default")]
+    pub name: String,
+}
+
+#[derive(Debug, ArgsDerive)]
+pub struct RunArgs {
+    /// Separate netns (If this option is set, you cannot use network without loopback)
+    #[arg(long, default_value_t = false)]
+    pub netns: bool,
+
+    /// Command to execute
+    pub command: Option<String>,
+
+    /// Arguments of command
+    #[arg(allow_hyphen_values = true)]
+    pub args: Option<Vec<String>>,
+}
+
+#[derive(Debug, ArgsDerive)]
+pub struct LogArgs {
+    /// Show all branch
+    #[arg(short, long)]
+    pub all: bool,
+}
+
+#[derive(Debug, ArgsDerive)]
+pub struct CommitArgs {
+    /// Commit message
+    #[arg(short, long)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, ArgsDerive)]
+pub struct BranchArgs {
+    /// Branch name you want to create or delete
+    pub branch_name: Option<String>,
+
+    /// Delete specified branch
+    #[arg(short, long, requires = "branch_name")]
+    pub delete: bool,
+
+    /// Show all branches
+    #[arg(short, long, exclusive = true)]
+    pub all: bool,
+}
+
+#[derive(Debug, ArgsDerive)]
+pub struct TargetArgs {
+    /// Commit ID or branch
+    pub query: String,
 }

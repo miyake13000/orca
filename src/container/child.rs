@@ -1,11 +1,9 @@
 use crate::mount::*;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use const_format::concatcp;
 use core::convert::Infallible;
 use nix::unistd;
-use nix::unistd::geteuid;
-use retry::{delay::Fixed, retry};
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::fs::{self, copy, create_dir_all};
 use std::io::{stderr, stdin, stdout};
 use std::os::unix::fs::symlink;
@@ -17,17 +15,6 @@ pub struct Initializer;
 const OLDROOT_NAME: &str = "oldroot";
 
 impl Initializer {
-    pub fn wait_for_mapping_id() -> Result<()> {
-        retry(Fixed::from_millis(50).take(20), || {
-            let uid = geteuid().as_raw() as u32;
-            match uid {
-                0 => Ok(()),
-                _ => Err(()),
-            }
-        })
-        .map_err(|_| anyhow!("Time out to wait for mapping UID"))
-    }
-
     pub fn store_resolv_conf<T: AsRef<Path>>(temp_dir: T) -> Result<()> {
         create_dir_all(temp_dir.as_ref())
             .with_context(|| format!("Failed to mkdir '{}'", temp_dir.as_ref().display()))?;
@@ -78,51 +65,51 @@ impl Initializer {
             .mount()
             .context("Failed to mount /proc")?;
 
-        Mount::<_, &str>::new("/dev/mqueue", FileType::Dir)
+        Mount::new("/dev/mqueue", FileType::Dir)
             .src("mqueue")
             .fs_type("mqueue")
             .flags(MountFlags::MS_NOSUID | MountFlags::MS_NODEV | MountFlags::MS_NOEXEC)
             .mount()
             .context("Failed to mount /proc")?;
 
-        Mount::<_, &str>::new("/dev/shm", FileType::Dir)
+        Mount::new("/dev/shm", FileType::Dir)
             .src("shm")
             .fs_type("tmpfs")
             .flags(MountFlags::MS_NOSUID | MountFlags::MS_NODEV | MountFlags::MS_NOEXEC)
             .mount()
             .context("Failed to mount /proc")?;
 
-        Mount::<_, &str>::new("/dev/null", FileType::File)
+        Mount::new("/dev/null", FileType::File)
             .src(concatcp!("/", OLDROOT_NAME, "/dev/null"))
             .flags(MountFlags::MS_BIND)
             .mount()
             .context("Failed to mount /proc")?;
 
-        Mount::<_, &str>::new("/dev/random", FileType::File)
+        Mount::new("/dev/random", FileType::File)
             .src(concatcp!("/", OLDROOT_NAME, "/dev/random"))
             .flags(MountFlags::MS_BIND)
             .mount()
             .context("Failed to mount /proc")?;
 
-        Mount::<_, &str>::new("/dev/full", FileType::File)
+        Mount::new("/dev/full", FileType::File)
             .src(concatcp!("/", OLDROOT_NAME, "/dev/full"))
             .flags(MountFlags::MS_BIND)
             .mount()
             .context("Failed to mount /proc")?;
 
-        Mount::<_, &str>::new("/dev/tty", FileType::File)
+        Mount::new("/dev/tty", FileType::File)
             .src(concatcp!("/", OLDROOT_NAME, "/dev/tty"))
             .flags(MountFlags::MS_BIND)
             .mount()
             .context("Failed to mount /proc")?;
 
-        Mount::<_, &str>::new("/dev/zero", FileType::File)
+        Mount::new("/dev/zero", FileType::File)
             .src(concatcp!("/", OLDROOT_NAME, "/dev/zero"))
             .flags(MountFlags::MS_BIND)
             .mount()
             .context("Failed to mount /proc")?;
 
-        Mount::<_, &str>::new("/dev/urandom", FileType::File)
+        Mount::new("/dev/urandom", FileType::File)
             .src(concatcp!("/", OLDROOT_NAME, "/dev/urandom"))
             .flags(MountFlags::MS_BIND)
             .mount()
@@ -165,20 +152,13 @@ impl Initializer {
         Ok(())
     }
 
-    pub fn set_hostname<T: AsRef<str>>(new_hostname: T) -> Result<()> {
-        unistd::sethostname(new_hostname.as_ref())?;
-        Ok(())
-    }
-
     pub fn connect_tty() -> Result<()> {
         let _ = unistd::setsid().unwrap();
-        let pty_slave = retry(Fixed::from_millis(10).take(100), || {
-            nix::fcntl::open(
-                "/dev/pts/0",
-                nix::fcntl::OFlag::O_RDWR,
-                nix::sys::stat::Mode::empty(),
-            )
-        })
+        let pty_slave = nix::fcntl::open(
+            "/dev/pts/0",
+            nix::fcntl::OFlag::O_RDWR,
+            nix::sys::stat::Mode::empty(),
+        )
         .context("Failed to open /dev/pts/0")?;
 
         let pty_slave_fd = pty_slave.as_raw_fd();
@@ -190,7 +170,7 @@ impl Initializer {
         let _ = unistd::dup2(pty_slave_fd, stderr)?;
         let _ = unistd::dup2(pty_slave_fd, stdin)?;
 
-        Mount::<_, &str>::new("/dev/console", FileType::File)
+        Mount::new("/dev/console", FileType::File)
             .src(concatcp!("/", OLDROOT_NAME, "/dev/console"))
             .flags(MountFlags::MS_BIND)
             .mount()
@@ -209,25 +189,21 @@ impl Initializer {
         Ok(())
     }
 
-    pub fn exec<S, T>(command: S, args: Option<Vec<T>>, envp: &[&CStr]) -> Result<Infallible>
+    pub fn exec<S>(command: &[S]) -> Result<Infallible>
     where
         S: AsRef<str>,
-        T: AsRef<str>,
     {
-        let command =
-            CString::new(command.as_ref()).context("Failed to change command into CSting")?;
+        let command_cstring =
+            CString::new(command[0].as_ref()).context("Failed to change command into CSting")?;
 
-        let mut argv: Vec<CString> = vec![command.clone()];
-        if let Some(args_vec) = args {
-            let args_iter = args_vec.iter();
-            for arg in args_iter {
-                let arg_cstring =
-                    CString::new(arg.as_ref()).context("Failed to change arg into CString")?;
-                argv.push(arg_cstring);
-            }
+        let mut argv: Vec<CString> = Vec::new();
+        for arg in command.iter() {
+            let arg_cstring =
+                CString::new(arg.as_ref()).context("Failed to change arg into CString")?;
+            argv.push(arg_cstring);
         }
 
-        unistd::execvpe(command.as_c_str(), &argv, envp)
-            .with_context(|| format!("Not found: '{}'", command.to_str().unwrap()))
+        unistd::execvp(command_cstring.as_c_str(), &argv)
+            .with_context(|| format!("Not found: '{}'", command_cstring.to_str().unwrap()))
     }
 }

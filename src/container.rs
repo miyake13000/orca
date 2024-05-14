@@ -2,161 +2,160 @@ mod child;
 mod parent;
 mod terminal;
 
-use crate::command::Command;
 use crate::image::ContainerImage;
 use crate::OrExit;
 use crate::STACK_SIZE;
+use anyhow::bail;
 use anyhow::{Context, Result};
+use nix::libc::SIGCHLD;
 use nix::sched::{clone, CloneFlags};
 use nix::sys::wait::wait;
+use os_pipe::pipe;
+use os_pipe::PipeReader;
+use os_pipe::PipeWriter;
 use parent::io_connector::IoConnector;
-use retry::{delay::Fixed, retry};
-use std::ffi::CStr;
 use std::io::stdin;
-use std::os::unix::io::AsRawFd;
+use std::io::{Read, Write};
+use std::os::fd::FromRawFd;
+use std::os::fd::OwnedFd;
 use std::path::Path;
 use terminal::Terminal;
 
+const SIGNAL_MOUNTED_DEVPTS: &[u8] = b"1";
+const SIGNAL_OPEN_PTMX: &[u8] = b"2";
+
 pub struct Container<T> {
     image: T,
-    io_connector: Option<IoConnector>,
+    io_connector: IoConnector,
     terminal: Terminal,
 }
 
 impl<T: ContainerImage> Container<T> {
-    pub fn new<P>(
-        image: T,
-        command: String,
-        cmd_args: Option<Vec<String>>,
-        netns_flag: bool,
-        work_dir: P,
-    ) -> Result<Self>
+    pub fn new<P>(image: T, command: Vec<String>, work_dir: P) -> Result<Self>
     where
         T: ContainerImage,
         P: AsRef<Path>,
     {
         let stack: &mut [u8; STACK_SIZE] = &mut [0; STACK_SIZE];
-        let cb = Box::new(|| child_main(&command, &cmd_args, &image, work_dir.as_ref()));
-        let signals = Some(libc::SIGCHLD);
-
-        let mut flags = CloneFlags::CLONE_NEWNS
+        let (mut child_reader, mut parent_writer) = pipe().unwrap();
+        let (mut parent_reader, mut child_writer) = pipe().unwrap();
+        let cb = Box::new(|| {
+            child_main(
+                &command,
+                &image,
+                work_dir.as_ref(),
+                &mut child_reader,
+                &mut child_writer,
+            )
+        });
+        let signals = Some(SIGCHLD);
+        let flags = CloneFlags::CLONE_NEWNS
+            | CloneFlags::CLONE_NEWPID
             | CloneFlags::CLONE_NEWUTS
-            | CloneFlags::CLONE_NEWIPC
-            | CloneFlags::CLONE_NEWPID;
-
-        if image.need_userns() {
-            flags.insert(CloneFlags::CLONE_NEWUSER);
-        }
-        if netns_flag {
-            flags.insert(CloneFlags::CLONE_NEWNET);
-        }
-
+            | CloneFlags::CLONE_NEWIPC;
         let child_pid =
-            clone(cb, stack, flags, signals).context("Failed to clone child process")?;
-
-        if image.need_userns() {
-            if Command::new("newuidmap", Option::<Vec<String>>::None).is_exist() {
-                parent::Initilizer::map_id_with_subuid(child_pid)?;
-            } else {
-                parent::Initilizer::map_id(child_pid)?;
-            }
-        }
+            unsafe { clone(cb, stack, flags, signals).context("Failed to clone child process")? };
 
         parent::Initilizer::setns(child_pid, flags).context("Failed to enter namespace")?;
 
-        let terminal = Terminal::new(stdin().as_raw_fd())?;
+        let mut signal_buf: [u8; 1] = [b'0'; 1];
+        parent_reader.read_exact(&mut signal_buf).unwrap();
+        if signal_buf != SIGNAL_MOUNTED_DEVPTS {
+            bail!("Unexpected child signal has received: {}", signal_buf[0]);
+        }
+        let io_connector = parent::Initilizer::connect_tty()?;
+        parent_writer.write_all(SIGNAL_OPEN_PTMX).unwrap();
+        let mut terminal = Terminal::new(stdin())?;
+        terminal.make_raw_mode()?;
+        let mut slave_terminal = get_pty_slave()?;
+        sync_tty_size(&terminal, &mut slave_terminal)?;
 
         Ok(Container {
             image,
-            io_connector: None,
+            io_connector,
             terminal,
         })
     }
 
-    pub fn connect_tty(&mut self) -> Result<()> {
-        self.io_connector = Some(parent::Initilizer::connect_tty()?);
-        let win_size = self
-            .terminal
-            .get_win_size()
-            .context("Failed to get current window size")?;
-        let pty_slave = retry(Fixed::from_millis(10).take(100), || {
-            nix::fcntl::open(
-                "/dev/pts/0",
-                nix::fcntl::OFlag::O_RDWR,
-                nix::sys::stat::Mode::empty(),
-            )
-        })
-        .context("Failed to open /dev/pts/0")?;
-
-        Terminal::new(pty_slave)
-            .context("Failed to open pty_slave")?
-            .set_win_size(win_size)
-            .context("Failed to set window size")?;
-        self.terminal.make_raw_mode()?;
-
-        Ok(())
-    }
-
     pub fn wait(self) -> Result<T> {
         wait().context("Failed to wait child process")?;
-        if let Some(io_connector) = self.io_connector {
-            io_connector.stop()?;
-        }
+        self.io_connector.stop()?;
+        std::mem::drop(self.terminal);
         Ok(self.image)
     }
 }
 
+fn get_pty_slave() -> Result<Terminal> {
+    let pty_slave = nix::fcntl::open(
+        "/dev/pts/0",
+        nix::fcntl::OFlag::O_RDWR,
+        nix::sys::stat::Mode::empty(),
+    )
+    .context("Failed to open /dev/pts/0")?;
+    let pty_slave = unsafe { OwnedFd::from_raw_fd(pty_slave) };
+
+    Terminal::new(pty_slave).context("Failed to open pty_slave")
+}
+
+fn sync_tty_size(src: &Terminal, tar: &mut Terminal) -> Result<()> {
+    let mut win_size = src
+        .get_win_size()
+        .context("Failed to get current window size")?;
+    tar.set_win_size(&mut win_size)
+        .context("Failed to set window size")?;
+
+    Ok(())
+}
+
 #[allow(clippy::needless_return)]
-fn child_main<T, U, I>(command: T, cmd_args: &Option<Vec<U>>, image: &I, work_dir: &Path) -> isize
+fn child_main<T, I>(
+    command: &[T],
+    image: &I,
+    work_dir: &Path,
+    reader: &mut PipeReader,
+    writer: &mut PipeWriter,
+) -> isize
 where
     T: AsRef<str>,
-    U: AsRef<str> + Clone,
     I: ContainerImage,
 {
     use child::Initializer;
     let error_message = "Failed to initialize container";
+    let mut signal_buf: [u8; 1] = [b'0'; 1];
 
-    if image.need_userns() {
-        Initializer::wait_for_mapping_id()
-            .context(error_message)
-            .or_exit();
-    }
     Initializer::store_resolv_conf(work_dir)
         .context(error_message)
         .or_exit();
     image.mount().context(error_message).or_exit();
-    Initializer::pivot_root(image.root_path())
+    Initializer::pivot_root(image.rootfs_path())
         .context(error_message)
         .or_exit();
     Initializer::mount_mandatory_files()
         .context(error_message)
         .or_exit();
+    writer.write_all(SIGNAL_MOUNTED_DEVPTS).unwrap();
     Initializer::copy_resolv_conf(work_dir)
         .context(error_message)
         .or_exit();
     Initializer::create_ptmx_link()
         .context(error_message)
         .or_exit();
-    if image.need_userns() {
-        Initializer::set_hostname(image.name())
-            .context(error_message)
-            .or_exit();
+    reader.read_exact(&mut signal_buf).unwrap();
+    if signal_buf != SIGNAL_OPEN_PTMX {
+        Result::<String>::Err(anyhow::anyhow!(
+            "Unexpected parent signal has received: {}",
+            signal_buf[0]
+        ))
+        .context(error_message)
+        .or_exit();
     }
     Initializer::connect_tty().context(error_message).or_exit();
     Initializer::unmount_old_root()
         .context(error_message)
         .or_exit();
-
-    let envp: Vec<&CStr> = vec![
-        CStr::from_bytes_with_nul(b"SHELL=/bin/sh\0").unwrap(),
-        CStr::from_bytes_with_nul(b"HOME=/root\0").unwrap(),
-        CStr::from_bytes_with_nul(b"TERM=xterm\0").unwrap(),
-        CStr::from_bytes_with_nul(b"PATH=/bin:/usr/bin:/sbin:/usr/sbin\0").unwrap(),
-    ];
-
-    Initializer::exec(command, cmd_args.clone(), &envp)
+    Initializer::exec(command)
         .context("Failed to initialize container")
         .or_exit();
 
-    return 0; // This unreachable code is neccessary for CloneCb
+    return 0; // This return is unreadchable but neccessary for CloneCb
 }
