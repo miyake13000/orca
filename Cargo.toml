@@ -10,7 +10,7 @@ description = "Lightweight Container Management Tool written by Rust"
 [dependencies]
 nix = { version = "0.28", features = ["sched", "term", "ioctl", "mount", "fs", "user"] }
 clap = { version = "4.5", features = ["derive", "string"] }
-reqwest = { version = "0.12", features = ["blocking", "json"] }
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 retry = "2.0"
