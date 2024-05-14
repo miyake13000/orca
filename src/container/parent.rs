@@ -51,13 +51,9 @@ impl Initilizer {
 
         let stdout = unsafe { OwnedFd::from_raw_fd(stdout().as_raw_fd()) };
         let stdin = unsafe { OwnedFd::from_raw_fd(stdin().as_raw_fd()) };
-        let pty_master = unsafe { OwnedFd::from_raw_fd(pty_master) };
+        let child_stdout = unsafe { OwnedFd::from_raw_fd(pty_master) };
+        let child_stdin = unsafe { OwnedFd::from_raw_fd(pty_master) };
 
-        Ok(IoConnector::new(
-            stdout,
-            stdin,
-            pty_master.try_clone().unwrap(),
-            pty_master,
-        ))
+        Ok(IoConnector::new(stdout, stdin, child_stdout, child_stdin))
     }
 }
