@@ -1,15 +1,7 @@
-pub mod args;
-pub mod container;
-pub mod image;
-pub mod mount;
-pub mod vcs;
-
-const STACK_SIZE: usize = 1024 * 1024;
-
 use anyhow::{Error, Result};
 use std::process::exit;
 
-trait OrExit<T> {
+pub trait OrExit<T> {
     fn or_exit(self) -> T;
 }
 

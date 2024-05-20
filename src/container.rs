@@ -2,8 +2,8 @@ mod child;
 mod parent;
 mod terminal;
 
+use crate::common::OrExit;
 use crate::image::ContainerImage;
-use crate::OrExit;
 use crate::STACK_SIZE;
 use anyhow::bail;
 use anyhow::{Context, Result};

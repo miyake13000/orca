@@ -1,15 +1,24 @@
+mod args;
+mod common;
+mod container;
+mod image;
+mod mount;
+mod vcs;
+
 use anyhow::{bail, Result};
+use args::{Action, Args, RunArgs};
 use clap::Parser;
+use container::Container;
+use image::HostImage;
 use nix::unistd::{getegid, geteuid};
-use orca::args::{Action, Args, RunArgs};
-use orca::container::Container;
-use orca::image::HostImage;
-use orca::vcs::{Commit, CommitsIter, Error, VCS};
 use std::env;
 use std::fs::{create_dir_all, rename};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use vcs::{Commit, CommitsIter, Error, VCS};
 use walkdir::WalkDir;
+
+const STACK_SIZE: usize = 1024 * 1024;
 
 const COMMITS_FILE_NAME: &str = "commits.toml";
 const MOUNTPOINT_DIR_NAME: &str = "rootfs";
