@@ -2,7 +2,7 @@
 name = "orca"
 version = "0.5.0"
 authors = ["nomlab <https://github.com/nomlab>"]
-edition = "2021"
+edition = "2024"
 description = "Lightweight Container Management Tool written by Rust"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
