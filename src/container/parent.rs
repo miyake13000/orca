@@ -1,8 +1,8 @@
 pub mod io_connector;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use io_connector::IoConnector;
-use nix::pty::{grantpt, unlockpt, PtyMaster};
+use nix::pty::{grantpt, posix_openpt, unlockpt};
 use nix::sched::{self, CloneFlags};
 use nix::unistd::Pid;
 use std::fs::File;
@@ -34,21 +34,10 @@ impl Initilizer {
     }
 
     pub fn connect_tty() -> Result<IoConnector> {
-        let pty_master_path = "/dev/pts/ptmx";
-        let pty_master = nix::fcntl::open(
-            pty_master_path,
-            nix::fcntl::OFlag::O_RDWR,
-            nix::sys::stat::Mode::all(),
-        )
-        .context("Child process has not connected tty yet")?;
-
-        let pty_master = unsafe { PtyMaster::from_owned_fd(pty_master) };
-        if grantpt(&pty_master).is_err() {
-            return Err(anyhow!("Failed to grantpt('{}')", pty_master_path));
-        }
-        if unlockpt(&pty_master).is_err() {
-            return Err(anyhow!("Failed to unlockpt('{}')", pty_master_path));
-        }
+        let pty_master = posix_openpt(nix::fcntl::OFlag::O_RDWR)
+            .context("Child process has not connected tty yet")?;
+        grantpt(&pty_master).context("Failed to grantpt")?;
+        unlockpt(&pty_master).context("Failed to unlockpt")?;
 
         let stdout = unsafe { OwnedFd::from_raw_fd(stdout().as_raw_fd()) };
         let stdin = unsafe { OwnedFd::from_raw_fd(stdin().as_raw_fd()) };

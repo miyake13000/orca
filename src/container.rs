@@ -130,11 +130,11 @@ where
     Initializer::mount_mandatory_files()
         .context(error_message)
         .or_exit();
-    writer.write_all(SIGNAL_MOUNTED_DEVPTS).unwrap();
-    Initializer::copy_resolv_conf(work_dir)
+    Initializer::create_ptmx_link()
         .context(error_message)
         .or_exit();
-    Initializer::create_ptmx_link()
+    writer.write_all(SIGNAL_MOUNTED_DEVPTS).unwrap();
+    Initializer::copy_resolv_conf(work_dir)
         .context(error_message)
         .or_exit();
     reader.read_exact(&mut signal_buf).unwrap();
