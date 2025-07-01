@@ -16,8 +16,6 @@ use os_pipe::PipeWriter;
 use parent::io_connector::IoConnector;
 use std::io::stdin;
 use std::io::{Read, Write};
-use std::os::fd::FromRawFd;
-use std::os::fd::OwnedFd;
 use std::path::Path;
 use terminal::Terminal;
 
@@ -92,7 +90,6 @@ fn get_pty_slave() -> Result<Terminal> {
         nix::sys::stat::Mode::empty(),
     )
     .context("Failed to open /dev/pts/0")?;
-    let pty_slave = unsafe { OwnedFd::from_raw_fd(pty_slave) };
 
     Terminal::new(pty_slave).context("Failed to open pty_slave")
 }

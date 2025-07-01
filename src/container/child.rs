@@ -6,8 +6,8 @@ use nix::unistd;
 use std::ffi::CString;
 use std::fs::{self, copy, create_dir_all};
 use std::io::{stderr, stdin, stdout};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::symlink;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 pub struct Initializer;
@@ -161,14 +161,14 @@ impl Initializer {
         )
         .context("Failed to open /dev/pts/0")?;
 
-        let pty_slave_fd = pty_slave.as_raw_fd();
-        let stdout = stdout().as_raw_fd();
-        let stderr = stderr().as_raw_fd();
-        let stdin = stdin().as_raw_fd();
+        let pty_slave_fd = pty_slave;
+        let mut stdout = unsafe { OwnedFd::from_raw_fd(stdout().as_raw_fd()) };
+        let mut stderr = unsafe { OwnedFd::from_raw_fd(stderr().as_raw_fd()) };
+        let mut stdin = unsafe { OwnedFd::from_raw_fd(stdin().as_raw_fd()) };
 
-        let _ = unistd::dup2(pty_slave_fd, stdout)?;
-        let _ = unistd::dup2(pty_slave_fd, stderr)?;
-        let _ = unistd::dup2(pty_slave_fd, stdin)?;
+        let _ = unistd::dup2(&pty_slave_fd, &mut stdout)?;
+        let _ = unistd::dup2(&pty_slave_fd, &mut stderr)?;
+        let _ = unistd::dup2(&pty_slave_fd, &mut stdin)?;
 
         Mount::new("/dev/console", FileType::File)
             .src(concatcp!("/", OLDROOT_NAME, "/dev/console"))
