@@ -16,8 +16,6 @@ use os_pipe::PipeWriter;
 use parent::io_connector::IoConnector;
 use std::io::stdin;
 use std::io::{Read, Write};
-use std::os::fd::FromRawFd;
-use std::os::fd::OwnedFd;
 use std::path::Path;
 use terminal::Terminal;
 
@@ -92,7 +90,6 @@ fn get_pty_slave() -> Result<Terminal> {
         nix::sys::stat::Mode::empty(),
     )
     .context("Failed to open /dev/pts/0")?;
-    let pty_slave = unsafe { OwnedFd::from_raw_fd(pty_slave) };
 
     Terminal::new(pty_slave).context("Failed to open pty_slave")
 }
@@ -133,11 +130,11 @@ where
     Initializer::mount_mandatory_files()
         .context(error_message)
         .or_exit();
-    writer.write_all(SIGNAL_MOUNTED_DEVPTS).unwrap();
-    Initializer::copy_resolv_conf(work_dir)
+    Initializer::create_ptmx_link()
         .context(error_message)
         .or_exit();
-    Initializer::create_ptmx_link()
+    writer.write_all(SIGNAL_MOUNTED_DEVPTS).unwrap();
+    Initializer::copy_resolv_conf(work_dir)
         .context(error_message)
         .or_exit();
     reader.read_exact(&mut signal_buf).unwrap();

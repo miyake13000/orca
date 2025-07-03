@@ -5,9 +5,7 @@ use core::convert::Infallible;
 use nix::unistd;
 use std::ffi::CString;
 use std::fs::{self, copy, create_dir_all};
-use std::io::{stderr, stdin, stdout};
 use std::os::unix::fs::symlink;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 pub struct Initializer;
@@ -161,14 +159,11 @@ impl Initializer {
         )
         .context("Failed to open /dev/pts/0")?;
 
-        let pty_slave_fd = pty_slave.as_raw_fd();
-        let stdout = stdout().as_raw_fd();
-        let stderr = stderr().as_raw_fd();
-        let stdin = stdin().as_raw_fd();
+        let pty_slave_fd = pty_slave;
 
-        let _ = unistd::dup2(pty_slave_fd, stdout)?;
-        let _ = unistd::dup2(pty_slave_fd, stderr)?;
-        let _ = unistd::dup2(pty_slave_fd, stdin)?;
+        unistd::dup2_stdin(&pty_slave_fd)?;
+        unistd::dup2_stdout(&pty_slave_fd)?;
+        unistd::dup2_stderr(&pty_slave_fd)?;
 
         Mount::new("/dev/console", FileType::File)
             .src(concatcp!("/", OLDROOT_NAME, "/dev/console"))
