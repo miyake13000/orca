@@ -1,5 +1,5 @@
+use crate::mount::{FileType, Mount, MountFlags};
 use anyhow::{Context, Result};
-use orca_mount::{FileType, Mount, MountFlags};
 use std::{
     fs::create_dir_all,
     path::{Path, PathBuf},

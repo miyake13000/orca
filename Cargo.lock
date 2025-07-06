@@ -863,7 +863,6 @@ dependencies = [
  "clap",
  "nix",
  "orca-container",
- "orca-image",
  "orca-vcs",
  "walkdir",
 ]
@@ -875,8 +874,6 @@ dependencies = [
  "anyhow",
  "const_format",
  "nix",
- "orca-image",
- "orca-mount",
  "os_pipe",
 ]
 
@@ -886,17 +883,13 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "flate2",
- "orca-mount",
  "reqwest",
+ "rm_rf",
+ "serde",
+ "serde_json",
  "tar",
-]
-
-[[package]]
-name = "orca-mount"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "nix",
+ "thiserror",
+ "walkdir",
 ]
 
 [[package]]
@@ -964,6 +957,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02b3e5e68a3a1a02aad3ec490a98007cbc13c37cbe84a3cd7b8e406d76e7f778"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "psm"
+version = "0.1.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e944464ec8536cd1beb0bbfd96987eb5e3b72f2ecdafdc5c769a37f1fa2ae1f"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -1126,6 +1128,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rm_rf"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3443b7a35aa12ed2e99edfc0ecbefe6a53b4848305cc83e29981dfa1aea1f71e"
+dependencies = [
+ "stacker",
 ]
 
 [[package]]
@@ -1306,6 +1317,19 @@ name = "stable_deref_trait"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8f112729512f8e442d81f95a8a7ddf2b7c6b8a1a6f509a95864142b30cab2d3"
+
+[[package]]
+name = "stacker"
+version = "0.1.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cddb07e32ddb770749da91081d8d0ac3a16f1a569a18b20348cd371f5dead06b"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "psm",
+ "windows-sys 0.59.0",
+]
 
 [[package]]
 name = "strsim"

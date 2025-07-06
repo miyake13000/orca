@@ -5,7 +5,7 @@ use args::{Action, Args, RunArgs};
 use clap::Parser;
 use nix::unistd::{getegid, geteuid};
 use orca_container::container::Container;
-use orca_image::HostImage;
+use orca_container::image::HostImage;
 use orca_vcs::{Commit, CommitsIter, Error, VCS};
 use std::env;
 use std::fs::{create_dir_all, rename};

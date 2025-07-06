@@ -1,3 +1,2 @@
-mod image;
-
-pub use image::*;
+pub mod downloader;
+pub mod merger;
