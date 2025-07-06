@@ -2,14 +2,14 @@ mod child;
 mod parent;
 mod terminal;
 
-use crate::image::ContainerImage;
-use crate::OrExit;
-use crate::STACK_SIZE;
+use super::OrExit;
+use super::STACK_SIZE;
 use anyhow::bail;
 use anyhow::{Context, Result};
 use nix::libc::SIGCHLD;
 use nix::sched::{clone, CloneFlags};
 use nix::sys::wait::wait;
+use orca_image::ContainerImage;
 use os_pipe::pipe;
 use os_pipe::PipeReader;
 use os_pipe::PipeWriter;

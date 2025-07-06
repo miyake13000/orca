@@ -1,0 +1,16 @@
+[package]
+name = "orca"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description.workspace = true
+license-file.workspace = true
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "string"] }
+anyhow = "1.0"
+nix = { version = "0.30", features = ["user"] }
+walkdir = "2.5"
+orca-vcs = { path = "../orca-vcs" }
+orca-image = { path = "../orca-image" }
+orca-container = { path = "../orca-container" }
