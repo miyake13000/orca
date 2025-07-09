@@ -2,9 +2,9 @@ mod child;
 mod parent;
 mod terminal;
 
-use crate::image::ContainerImage;
-use crate::OrExit;
-use crate::STACK_SIZE;
+use super::image::ContainerImage;
+use super::OrExit;
+use super::STACK_SIZE;
 use anyhow::bail;
 use anyhow::{Context, Result};
 use nix::libc::SIGCHLD;

@@ -1,0 +1,13 @@
+[package]
+name = "orca-container"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description.workspace = true
+license-file.workspace = true
+
+[dependencies]
+nix = { version = "0.30", features = ["sched", "mount", "term", "ioctl", "fs", "user"] }
+anyhow = "1.0"
+os_pipe = "1.2"
+const_format = "0.2"
