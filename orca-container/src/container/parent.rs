@@ -2,13 +2,12 @@ pub mod io_connector;
 
 use anyhow::{Context, Result};
 use io_connector::IoConnector;
-use nix::pty::{grantpt, posix_openpt, unlockpt};
+use nix::pty::{grantpt, posix_openpt, unlockpt, PtyMaster};
 use nix::sched::{self, CloneFlags};
 use nix::unistd::Pid;
 use std::fs::File;
 use std::io::{stdin, stdout};
-use std::os::fd::{FromRawFd, OwnedFd};
-use std::os::unix::io::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 pub struct Initilizer;
 
@@ -39,12 +38,22 @@ impl Initilizer {
         grantpt(&pty_master).context("Failed to grantpt")?;
         unlockpt(&pty_master).context("Failed to unlockpt")?;
 
-        let stdout = unsafe { OwnedFd::from_raw_fd(stdout().as_raw_fd()) };
-        let stdin = unsafe { OwnedFd::from_raw_fd(stdin().as_raw_fd()) };
-        let pty_master: OwnedFd = pty_master.into();
-        let child_stdout = pty_master.try_clone().unwrap();
-        let child_stdin = pty_master;
+        let stdout = stdout();
+        let stdin = stdin();
+        let pty_master_clone = unsafe { Self::clone_pty_master(&pty_master) };
 
-        Ok(IoConnector::new(stdout, stdin, child_stdout, child_stdin))
+        Ok(IoConnector::new(
+            stdout,
+            stdin,
+            pty_master,
+            pty_master_clone,
+        ))
+    }
+
+    unsafe fn clone_pty_master(master: &PtyMaster) -> PtyMaster {
+        unsafe {
+            let fd = OwnedFd::from_raw_fd(master.as_raw_fd());
+            PtyMaster::from_owned_fd(fd)
+        }
     }
 }
