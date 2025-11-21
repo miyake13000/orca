@@ -40,6 +40,15 @@ impl Initializer {
     }
 
     pub fn mount_mandatory_files() -> Result<()> {
+        Mount::new("/sys", FileType::Dir)
+            .src("sysfs")
+            .fs_type("sysfs")
+            .add_flags(MountFlags::MS_RDONLY)
+            .add_flags(MountFlags::MS_NOSUID)
+            .add_flags(MountFlags::MS_NODEV)
+            .add_flags(MountFlags::MS_NOEXEC)
+            .mount()
+            .context("Failed to mount /sys")?;
         Mount::new("proc", FileType::Dir)
             .src("proc")
             .fs_type("proc")
@@ -112,17 +121,6 @@ impl Initializer {
             .flags(MountFlags::MS_BIND)
             .mount()
             .context("Failed to mount /proc")?;
-
-        //BUG: trying to mount sysfs must fail with unknown reason
-        //MountArgs::new("/sys", FileType::Dir)
-        //    .src("sysfs")
-        //    .fs_type("sysfs")
-        //    .add_flags(MountFlags::MS_RDONLY)
-        //    .add_flags(MountFlags::MS_NOSUID)
-        //    .add_flags(MountFlags::MS_NODEV)
-        //    .add_flags(MountFlags::MS_NOEXEC)
-        //    .mount()
-        //    .context("Failed to mount /proc")?;
 
         Ok(())
     }
