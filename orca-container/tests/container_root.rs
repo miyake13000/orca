@@ -39,7 +39,13 @@ fn host_container_isolates_writes_and_propagates_exit_code() {
         .cmd(vec![
             "/bin/sh".into(),
             "-c".into(),
-            format!("echo data > /{marker} && [ \"$(hostname)\" = itest ] && exit 7"),
+            // Also assert device permissions: mknod is umask-sensitive,
+            // so /dev/null must be forced back to 666 (regression test).
+            format!(
+                "echo data > /{marker} && [ \"$(hostname)\" = itest ] \
+                 && [ \"$(stat -c %a /dev/null)\" = 666 ] \
+                 && [ \"$(stat -c %a /dev/tty)\" = 666 ] && exit 7"
+            ),
         ])
         .build()
         .unwrap();

@@ -177,7 +177,9 @@ const REQUIRED_MOUNTS: &[PseudoMount] = &[
         fstype: "devpts",
         source: "devpts",
         flags: MsFlags::MS_NOSUID.union(MsFlags::MS_NOEXEC),
-        data: Some("newinstance,ptmxmode=0666,mode=0620"),
+        // gid=5 = the conventional "tty" group (OCI default), so slaves
+        // are rw for the owner and w for group tty (mode=0620).
+        data: Some("newinstance,ptmxmode=0666,mode=0620,gid=5"),
     },
 ];
 
@@ -239,6 +241,17 @@ fn populate_dev() {
     for (path, major, minor) in DEVICES {
         let mode = Mode::from_bits_truncate(0o666);
         if let Err(e) = mknod(*path, SFlag::S_IFCHR, mode, makedev(*major, *minor)) {
+            warn(path, e);
+            continue;
+        }
+        // mknod(2) masks the mode with the caller's umask (022 turns 666
+        // into 644, breaking e.g. `su` + /dev/null); the device table is
+        // authoritative, so enforce the mode explicitly (chmod ignores
+        // the umask).
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))
+        {
             warn(path, e);
         }
     }
