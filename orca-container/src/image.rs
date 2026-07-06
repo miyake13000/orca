@@ -1,120 +1,71 @@
-use crate::mount::{FileType, Mount, MountFlags};
-use anyhow::{Context, Result};
-use std::{
-    fs::create_dir_all,
-    path::{Path, PathBuf},
-};
+//! [`OverlayMount`]: gives `orca_image::Image` the ability to mount itself.
+//!
+//! Overlay mounting happens inside the child's mount namespace, which is a
+//! container concern — so the trait *and* its impl for `Image` live here
+//! (orphan rule: the trait is local). `Image` itself stays mount-agnostic
+//! in `orca-image`.
 
-const OVERLAYFS_FSTYPE: &str = "overlay";
+use std::path::PathBuf;
 
-pub struct HostImage {
-    mount_config: OverlayConfig,
-    fake_mount_config: OverlayConfig,
+use orca_image::{Base, Image};
+
+use crate::mount::{MountError, mount_fake_rootfs, overlay_mount};
+
+/// Runtime paths under `run/<uuid>/session/`, prepared by the `orca` crate
+/// and consumed by the container.
+///
+/// `base` is the session directory itself; `Container::run` creates it and
+/// `Container::wait` (or failure cleanup) removes it wholesale. The
+/// subdirectories are created on demand by [`OverlayMount::mount`].
+#[derive(Debug, Clone)]
+pub struct SessionPaths {
+    /// The session directory (`run/<uuid>/session/`).
+    pub base: PathBuf,
+    /// Overlay mount point and `pivot_root` target (`session/rootfs`).
+    pub rootfs: PathBuf,
+    /// Overlay workdir (`session/work`).
+    pub work: PathBuf,
+    /// Host-based only: stage-1 overlay mount point (`session/fake_rootfs`).
+    pub fake_rootfs: PathBuf,
+    /// Host-based only: stage-1 throwaway upper (`session/fake_upper`).
+    pub fake_upper: PathBuf,
+    /// Host-based only: stage-1 workdir (`session/fake_work`).
+    pub fake_work: PathBuf,
 }
 
-struct OverlayConfig {
-    mp: PathBuf,
-    upperdir: PathBuf,
-    lowerdir: Vec<PathBuf>,
-    workdir: PathBuf,
+/// A mounted rootfs: the overlay mount point that `pivot_root` targets.
+pub struct Rootfs(pub PathBuf);
+
+/// The container-side capability of being overlay-mounted into a rootfs.
+///
+/// Contract: the caller must be inside the child's fresh mount namespace
+/// and have called [`crate::mount::make_private`] beforehand.
+pub trait OverlayMount {
+    /// Mount the overlay stack and return the merged mount point.
+    fn mount(&self, session: &SessionPaths) -> Result<Rootfs, MountError>;
 }
 
-pub trait ContainerImage {
-    fn mount(&self) -> Result<()>;
-    fn rootfs_path(&self) -> &Path;
-}
-
-impl HostImage {
-    pub fn new<S1, S2, S3, S4, S5>(
-        mount_point: S1,
-        upperdir: S2,
-        additional_lowerdirs: Vec<S3>,
-        workdir: S4,
-        tmpdir: S5,
-    ) -> Self
-    where
-        S1: Into<PathBuf>,
-        S2: Into<PathBuf>,
-        S3: Into<PathBuf>,
-        S4: Into<PathBuf>,
-        S5: Into<PathBuf>,
-    {
-        let tmpdir = tmpdir.into();
-        let fake_mount_config = OverlayConfig {
-            mp: tmpdir.join("fake_rootfs"),
-            upperdir: tmpdir.join("fake_upper"),
-            lowerdir: vec![PathBuf::from("/")],
-            workdir: tmpdir.join("fake_work"),
+impl OverlayMount for Image {
+    /// Translate `base` into the bottom lower layers — the only place
+    /// Host/Guest branch — then mount the main overlay:
+    /// `lowerdir = committed layers (newest first) : base`, upper =
+    /// `diff/`, workdir = `session/work`.
+    fn mount(&self, session: &SessionPaths) -> Result<Rootfs, MountError> {
+        let base_lowers: Vec<PathBuf> = match &self.base {
+            // Host: `/` cannot sit in lowerdir directly (dentry-based
+            // overlap check); fold it into fake_rootfs first (DESIGN §5).
+            Base::Host => vec![mount_fake_rootfs(
+                std::path::Path::new("/"),
+                &session.fake_rootfs,
+                &session.fake_upper,
+                &session.fake_work,
+            )?],
+            Base::Guest(layers) => layers.iter().map(|l| l.path().to_path_buf()).collect(),
         };
-        create_all_dirs(&fake_mount_config);
-
         let mut lowerdir: Vec<PathBuf> =
-            additional_lowerdirs.into_iter().map(|p| p.into()).collect();
-        lowerdir.push(fake_mount_config.mp.clone());
-
-        let mount_config = OverlayConfig {
-            mp: mount_point.into(),
-            upperdir: upperdir.into(),
-            lowerdir,
-            workdir: workdir.into(),
-        };
-
-        Self {
-            mount_config,
-            fake_mount_config,
-        }
-    }
-}
-
-fn create_all_dirs(dirs: &OverlayConfig) {
-    if !dirs.mp.exists() {
-        create_dir_all(&dirs.mp).unwrap();
-    }
-    if !dirs.upperdir.exists() {
-        create_dir_all(&dirs.upperdir).unwrap();
-    }
-    if !dirs.workdir.exists() {
-        create_dir_all(&dirs.workdir).unwrap();
-    }
-}
-
-impl ContainerImage for HostImage {
-    fn mount(&self) -> Result<()> {
-        Mount::new("/", FileType::Dir)
-            .add_flags(MountFlags::MS_PRIVATE)
-            .add_flags(MountFlags::MS_REC)
-            .mount()
-            .context("Failed to make '/' private")?;
-
-        Mount::new(&self.fake_mount_config.mp, FileType::Dir)
-            .fs_type(OVERLAYFS_FSTYPE)
-            .data(self.fake_mount_config.to_option_string().as_str())
-            .mount()?;
-
-        Mount::new(&self.mount_config.mp, FileType::Dir)
-            .fs_type(OVERLAYFS_FSTYPE)
-            .data(self.mount_config.to_option_string().as_str())
-            .mount()
-    }
-
-    fn rootfs_path(&self) -> &Path {
-        self.mount_config.mp.as_path()
-    }
-}
-
-impl OverlayConfig {
-    fn to_option_string(&self) -> String {
-        let upperdir = format!("{}", self.upperdir.display());
-        let workdir = format!("{}", self.workdir.display());
-        let mut lowerdir = String::new();
-        self.lowerdir
-            .iter()
-            .for_each(|p| lowerdir.push_str(format!("{}:", p.display()).as_str()));
-        let lowerdir_striped = if !lowerdir.is_empty() {
-            lowerdir.strip_suffix(':').unwrap()
-        } else {
-            lowerdir.as_str()
-        };
-        format!("lowerdir={lowerdir_striped},upperdir={upperdir},workdir={workdir}")
+            self.lower.iter().map(|l| l.path().to_path_buf()).collect();
+        lowerdir.extend(base_lowers);
+        overlay_mount(&session.rootfs, &lowerdir, self.upper.path(), &session.work)?;
+        Ok(Rootfs(session.rootfs.clone()))
     }
 }

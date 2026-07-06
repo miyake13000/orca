@@ -1,141 +1,171 @@
 # orca
 
-Sandbox version control system
+English | [日本語](README_ja.md)
 
-## Summary
+A container environment manager with Git-like version control, built in Rust.
 
-Orca creates sandboxes from
+orca lets you spin up isolated Linux containers, make changes freely, and commit or discard them — just like version-controlling your environment.
 
-1. host's filesystem
-2. container (DockerHub)  
-   and version control both host and container environment (by versioning entire filesystem with OverlayFS)
+## Motivation
 
-Read [mechanism](docs/mechanism.md) for more information.
+Ever wanted to try `make install` without worrying about your system? Or debug a production issue by making destructive changes to your environment, knowing you can instantly roll back?
 
-## Install orca
-
-Download orca from [release page](https://github.com/miyake13000/orca/releases/latest).
-Or execute below command to download command-line.
+orca solves this by combining **OverlayFS-based container isolation** with **Git-style version control** for your filesystem changes.
 
 ```bash
-$ wget https://github.com/miyake13000/orca/releases/latest/download/orca
-$ chmod +x ./orca
+# Create a container based on your host system
+orca init myenv
+
+# Enter the container and do whatever you want
+orca run bash
+# $ make install    <- safe! changes are isolated
+# $ apt install ... <- go wild
+# $ exit
+
+# Commit the changes, just like Git
+orca commit -m "install foo and its dependencies"
+
+# Or throw them away
+orca clean
 ```
 
-### Optional
+## Features
 
-Orca needs root priviledge, so make orca available with sudo.
+- **OverlayFS isolation** — your base image (host rootfs or Docker image) is never modified
+- **Git-style version control** — commit, branch, checkout, reset, rebase, and log your environment changes
+- **Docker image support** — pull and use any Docker image as a base
+- **Host rootfs support** — use your live system as a base for zero-setup containers
+- **Branching** — experiment in parallel, merge or discard branches freely
+
+## Requirements
+
+- Linux kernel with OverlayFS support
+- Root privileges (or `CAP_SYS_ADMIN`)
+
+## Installation
 
 ```bash
-$ sudo mv ./orca /usr/bin/
+cargo install orca
 ```
 
-Or, setuid to orca
+## Quick Start
 
 ```bash
-$ sudo chmod 6755 ./orca
+# Create a container from your host system (default)
+orca init myenv
+
+# Or from a Docker image
+orca init myenv --image ubuntu:24.04
+
+# Enter the container
+orca run
+
+# Make changes, then commit
+orca commit -m "installed build dependencies"
+
+# View history
+orca log
+
+# Create a branch to try something risky
+orca branch experiment
+orca checkout experiment
+orca run bash
+orca commit -m "tried the risky thing"
+
+# Rebase back (or just discard the branch)
+orca checkout main
+orca rebase main experiment
 ```
 
-## How to use
+## CLI Reference
 
-1. Initialize (once)
-   ```bash
-   $ orca init # Use host envrionment
-   ```
-   Or, you can use container image
-   ```bash
-   $ orca init --image ubuntu:22.04 --name ubuntu-test
-   ```
-2. Run orca
-   ```bash
-   # current files: example.c
-   $ orca run # Enter sandbox
-   $ apt update && apt install -y clang
-   $ clang -o example example.c
-   # current files: example example.c
-   $ ./example
-   $ exit # Exit from sandbox
-   # current files: example.c
-   ```
-   Or, you can use container image created orca init
-   ```bash
-   $ orca --name ubuntu-test run
-   $ apt update && apt install -y clang
-   $ clang -o example example.c
-   ```
-3. Commit environment
-   ```bash
-   $ orca commit --message "Install clang"
-   $ orca log
-   commit: 8dfb0a6c3c943d14ab4cf745d1c761cc6f386219
-     date: 2024-05-03 10:46:11.868560348 +09:00
-     message: Install clang
-   ```
-4. Create branch
+### Global Options
 
-   ```bash
-   $ orca branch libc
-   $ orca checkout libc
-   $ orca run bash -c "apt update && apt install -y 2.35-0ubuntu3"
-   $ orca run gcc -o example example.com
-   $ orca log
-   commit: 408dfdc46bb489eafbf6e38acbeae7656d0c31ec
-     date: 2024-05-03 10:49:25.145348653 +09:00
-     message: Downgrade libc
+```
+orca [--env <name-or-uuid>] <command> [args]
+```
 
-   commit: 8dfb0a6c3c943d14ab4cf745d1c761cc6f386219
-     date: 2024-05-03 10:46:11.868560348 +09:00
-     message: Install clang
-   ```
+The target environment is resolved in this order:
 
-5. Merge branch
+1. `--env` option
+2. `ORCA_ENV` environment variable
+3. Current environment (set via `orca use`)
 
-   ```bash
-   $ orca checkout main
-   $ orca merge libc
-   $ orca log
-   commit: 408dfdc46bb489eafbf6e38acbeae7656d0c31ec
-     date: 2024-05-03 10:49:25.145348653 +09:00
-     message: Downgrade libc
+---
 
-   commit: 8dfb0a6c3c943d14ab4cf745d1c761cc6f386219
-     date: 2024-05-03 10:46:11.868560348 +09:00
-     message: Install clang
-   ```
+### Environment Management
 
-6. Reset commit
-   ```bash
-   $ orca reset 8dfb0a
-   $ orca log
-   commit: 8dfb0a6c3c943d14ab4cf745d1c761cc6f386219
-     date: 2024-05-03 10:46:11.868560348 +09:00
-     message: Install clang
-   ```
+| Command | Description |
+|---|---|
+| `orca init <name>` | Create a new environment from host rootfs (default) |
+| `orca init <name> --host` | Explicitly use host rootfs as base |
+| `orca init <name> --image ubuntu:24.04` | Use a Docker image as base |
+| `orca init <name> --keep` | Create without switching current environment |
+| `orca use <name-or-uuid>` | Switch the current environment |
+| `orca ls` | List all environments |
+| `orca rm <name-or-uuid>` | Delete an environment entirely (asks for confirmation; `--yes` to skip) |
+| `orca clean` | Discard uncommitted changes (destroy upper layer) |
 
-## Uninstall
+### Running
 
-1. `sudo rm $(which orca)`
-2. `sudo rm -rf $HOME/.local/share/orca`
+| Command | Description |
+|---|---|
+| `orca run` | Enter the container (resumes from last state if uncommitted changes exist) |
+| `orca run <cmd> [args]` | Run a specific command inside the container |
+| `orca run --no-pid` / `--no-uts` / `--no-ipc` | Disable PID / UTS / IPC namespace isolation |
+| `orca run --network` | Isolate the network namespace (shared with host by default) |
 
-## Build from source
+### Version Control
 
-### normal build
+| Command | Description |
+|---|---|
+| `orca commit -m <message>` | Commit current changes (not allowed in detached HEAD) |
+| `orca diff` | Show uncommitted file changes |
+| `orca diff <A> [<B>]` | Show changes of commit A (against the base, or against commit B) |
+| `orca log` | Show commit history |
+| `orca branch <n>` | Create a new branch from current HEAD |
+| `orca branch -d <n>` | Delete a branch |
+| `orca branch -a` | List all branches |
+| `orca checkout <branch-or-commit>` | Switch to a branch or commit (requires clean state) |
+| `orca checkout -b <n>` | Create a new branch and switch to it |
+| `orca reset <commit>` | Hard reset to a previous commit (not allowed in detached HEAD) |
+| `orca rebase <newbase> <target>` | Rebase target branch onto newbase |
+| `orca merge <branch>` | Merge a branch (not yet implemented) |
+| `orca gc` | Remove unreachable commits and objects |
 
-1. Install [Rust](https://www.rust-lang.org/tools/install)
-2. Build orca
-   ```bash
-   $ cargo build --release
-   ```
-3. Orca is placed 'target/release/orca'
+> `ROOT` can be used as the target of `checkout` / `reset` — it resolves to the initial (parentless) commit.
 
-### staticaly linked build
+### Apply
 
-1. Install 'x86_64-unknown-linux-musl' target
-   ```bash
-   $ rustup target add x86_64-unknown-linux-musl
-   ```
-2. Build orca
-   ```bash
-   $ cargo build --release --target x86_64-unknown-linux-musl
-   ```
-3. Orca is placed 'target/x86_64-unknown-linux-musl/release/orca'
+| Command | Description |
+|---|---|
+| `orca apply` | Apply all committed changes + uncommitted changes to host |
+| `orca apply --no-upper` | Apply committed changes only (exclude uncommitted changes) |
+| `orca apply --dry-run` | Show changes without applying |
+| `orca apply --yes` | Skip confirmation prompt |
+
+> Only available for host-based containers. Docker image-based containers will error.
+
+### Image Management
+
+| Command | Description |
+|---|---|
+| `orca image pull ubuntu:24.04` | Pull a Docker image |
+| `orca image ls` | List cached images |
+| `orca image rm ubuntu:24.04` | Remove a cached image |
+
+---
+
+
+## Limitations
+
+- Linux only (OverlayFS is a Linux kernel feature)
+- Requires root or `CAP_SYS_ADMIN`
+- Maximum 500 committed layers per container (OverlayFS kernel limit)
+- Filesystems mounted separately on the host (e.g. a separate `/home` partition) are not visible inside host-based containers (OverlayFS lower layers do not cross mount points)
+- `orca merge` is not yet implemented; use `orca rebase <newbase> <target>` instead (rebase target onto newbase)
+- Concurrent access to the same container is not supported
+
+## License
+
+MIT

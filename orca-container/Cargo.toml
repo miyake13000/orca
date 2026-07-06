@@ -1,13 +1,16 @@
 [package]
 name = "orca-container"
 version.workspace = true
-authors.workspace = true
 edition.workspace = true
-description.workspace = true
-license-file.workspace = true
+license.workspace = true
+description = "OverlayFS container runtime for orca"
 
 [dependencies]
-nix = { version = "0.30", features = ["sched", "mount", "term", "ioctl", "fs", "user", "event"] }
-anyhow = "1.0"
-os_pipe = "1.2"
-const_format = "0.2"
+orca-image.workspace = true
+
+libc.workspace = true
+nix.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

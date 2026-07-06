@@ -1,149 +1,165 @@
-use anyhow::{bail, Context, Result};
-use nix::mount::{MntFlags, MsFlags};
-use std::fs::{create_dir_all, remove_dir_all, File};
+//! Mount helpers used inside the child's mount namespace.
+//!
+//! All functions here mutate mount state and must only be called in the
+//! child process after `clone(CLONE_NEWNS)`; the mounts vanish with the
+//! namespace when the child exits, so no unmount bookkeeping is needed on
+//! the host side.
+
 use std::path::{Path, PathBuf};
 
-#[derive(Eq, PartialEq, Ord, PartialOrd)]
-pub enum FileType {
-    File,
-    Dir,
+use nix::mount::{MntFlags, MsFlags, mount, umount2};
+
+/// Errors from mount operations, carrying the target path for context.
+#[derive(Debug, thiserror::Error)]
+pub enum MountError {
+    /// A mount / umount syscall failed.
+    #[error("mount operation on {path} failed: {source}")]
+    Syscall {
+        /// Mount target.
+        path: PathBuf,
+        /// errno.
+        source: nix::Error,
+    },
+    /// Creating a mount point directory failed.
+    #[error("failed to create mount point {path}: {source}")]
+    Mkdir {
+        /// Directory being created.
+        path: PathBuf,
+        /// Underlying error.
+        source: std::io::Error,
+    },
 }
 
-impl FileType {
-    pub fn is_file(&self) -> bool {
-        *self == FileType::File
-    }
-
-    pub fn is_dir(&self) -> bool {
-        *self == FileType::Dir
+fn syscall_err(path: &Path, source: nix::Error) -> MountError {
+    MountError::Syscall {
+        path: path.to_path_buf(),
+        source,
     }
 }
 
-pub type MountFlags = MsFlags;
-
-pub struct Mount {
-    src: Option<PathBuf>,
-    dest: PathBuf,
-    fs_type: Option<String>,
-    flags: MountFlags,
-    data: Option<String>,
-    file_type: FileType,
+fn mkdir_all(path: &Path) -> Result<(), MountError> {
+    std::fs::create_dir_all(path).map_err(|source| MountError::Mkdir {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
-impl Mount {
-    pub fn new<P: Into<PathBuf>>(dest: P, file_type: FileType) -> Self {
-        Self {
-            src: None,
-            dest: dest.into(),
-            fs_type: None,
-            flags: MountFlags::empty(),
-            data: None,
-            file_type,
-        }
-    }
+/// Make the whole mount tree private (`/` gets `MS_REC | MS_PRIVATE`) so
+/// nothing the child mounts propagates back to the host.
+///
+/// Precondition: called once in the child, before any other mount here.
+pub fn make_private() -> Result<(), MountError> {
+    mount(
+        None::<&str>,
+        "/",
+        None::<&str>,
+        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+        None::<&str>,
+    )
+    .map_err(|e| syscall_err(Path::new("/"), e))
+}
 
-    pub fn src<P: Into<PathBuf>>(mut self, src: P) -> Self {
-        self.src = Some(src.into());
-        self
-    }
+/// Mount an overlay at `target` with the given lower stack (highest
+/// priority first), upper and workdir. Creates `target` and `work` as
+/// needed; `upper` must already exist (it is the persistent `diff/`).
+///
+/// Note: overlay option strings cannot escape `:` or `,`; orca's layer
+/// paths never contain them (uuid/hex names under the orca root).
+pub fn overlay_mount(
+    target: &Path,
+    lowers: &[PathBuf],
+    upper: &Path,
+    work: &Path,
+) -> Result<(), MountError> {
+    mkdir_all(target)?;
+    mkdir_all(work)?;
+    let lowerdir = lowers
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(":");
+    let data = format!(
+        "lowerdir={},upperdir={},workdir={}",
+        lowerdir,
+        upper.display(),
+        work.display()
+    );
+    mount(
+        Some("overlay"),
+        target,
+        Some("overlay"),
+        MsFlags::empty(),
+        Some(data.as_str()),
+    )
+    .map_err(|e| syscall_err(target, e))
+}
 
-    pub fn fs_type<S: ToString>(mut self, fs_type: S) -> Self {
-        self.fs_type = Some(fs_type.to_string());
-        self
-    }
+/// Stage-1 mount for host-based environments: overlay `src` (the host `/`)
+/// to `mp` using a throwaway upper/workdir, returning `mp`.
+///
+/// The intermediate overlay exists purely to mint a rootfs view whose
+/// dentries have no ancestry relation with the orca storage directories:
+/// putting `/` directly in `lowerdir` (or bind-mounting it) trips the
+/// kernel's dentry-based overlapping-layer check against `diff/` and the
+/// layer dirs (see DESIGN §5). The upper never receives writes — stage 2
+/// only reads this mount as a lower — and is destroyed with the session.
+pub fn mount_fake_rootfs(
+    src: &Path,
+    mp: &Path,
+    fake_upper: &Path,
+    fake_work: &Path,
+) -> Result<PathBuf, MountError> {
+    mkdir_all(fake_upper)?;
+    overlay_mount(mp, &[src.to_path_buf()], fake_upper, fake_work)?;
+    Ok(mp.to_path_buf())
+}
 
-    pub fn data<S: ToString>(mut self, data: S) -> Self {
-        self.data = Some(data.to_string());
-        self
-    }
+/// Detach the old root after `pivot_root` (`MNT_DETACH`) and remove the
+/// mount point directory (best-effort).
+pub fn unmount_old_root(old_root: &Path) -> Result<(), MountError> {
+    umount2(old_root, MntFlags::MNT_DETACH).map_err(|e| syscall_err(old_root, e))?;
+    let _ = std::fs::remove_dir(old_root);
+    Ok(())
+}
 
-    pub fn flags(mut self, flags: MountFlags) -> Self {
-        self.flags = flags;
-        self
-    }
+/// A pseudo-filesystem mount inside the container (OCI-style table entry).
+pub(crate) struct PseudoMount {
+    /// Mount target inside the container (absolute, post-pivot).
+    pub target: &'static str,
+    /// Filesystem type (`proc`, `sysfs`, `tmpfs`, ...).
+    pub fstype: &'static str,
+    /// Source name (conventionally the fstype or a label).
+    pub source: &'static str,
+    /// Mount flags.
+    pub flags: MsFlags,
+    /// Filesystem-specific data string.
+    pub data: Option<&'static str>,
+}
 
-    pub fn add_flags(mut self, flag: MountFlags) -> Self {
-        self.flags = self.flags.union(flag);
-        self
-    }
-
-    pub fn mount(self) -> Result<()> {
-        let dest_path = self.dest.as_path();
-        match dest_path.metadata() {
-            Ok(dest) => {
-                if self.file_type.is_dir() && !dest.is_dir() {
-                    bail!("Cannot mount directory on file: {}", dest_path.display());
-                } else if self.file_type.is_file() && dest.is_dir() {
-                    bail!("Cannot mount file on directory: {}", dest_path.display());
-                }
-            }
-            Err(_) => {
-                if self.file_type.is_file() {
-                    File::create(dest_path)
-                        .with_context(|| format!("Failed to create '{}'", dest_path.display()))?;
-                } else {
-                    create_dir_all(dest_path)
-                        .with_context(|| format!("Failed to create '{}'", dest_path.display()))?;
-                }
-            }
-        }
-
-        nix::mount::mount(
-            self.src.as_deref(),
-            self.dest.as_path(),
-            self.fs_type.as_deref(),
+impl PseudoMount {
+    /// Perform the mount, creating the target directory.
+    pub fn mount(&self) -> Result<(), MountError> {
+        let target = Path::new(self.target);
+        mkdir_all(target)?;
+        mount(
+            Some(self.source),
+            target,
+            Some(self.fstype),
             self.flags,
-            self.data.as_deref(),
-        )?;
-
-        Ok(())
+            self.data,
+        )
+        .map_err(|e| syscall_err(target, e))
     }
 }
 
-pub type UnMountFlags = MntFlags;
-
-pub struct UnMount<T> {
-    dest: T,
-    flags: UnMountFlags,
-    remove_mount_point: bool,
-}
-
-impl<T: AsRef<Path>> UnMount<T> {
-    pub fn new(dest: T) -> Self {
-        Self {
-            dest,
-            flags: UnMountFlags::empty(),
-            remove_mount_point: false,
-        }
-    }
-
-    pub fn flags(mut self, flags: UnMountFlags) -> Self {
-        self.flags = flags;
-        self
-    }
-
-    pub fn add_flag(mut self, flag: UnMountFlags) -> Self {
-        self.flags |= flag;
-        self
-    }
-
-    pub fn remove_mount_point(mut self, flag: bool) -> Self {
-        self.remove_mount_point = flag;
-        self
-    }
-
-    pub fn unmount(self) -> Result<()> {
-        let dest = self.dest.as_ref();
-        nix::mount::umount2(dest, self.flags)?;
-
-        if self.remove_mount_point {
-            if dest.is_file() || dest.is_dir() {
-                remove_dir_all(dest)?;
-            } else {
-                bail!("Cannot remove: '{}'", dest.display());
-            }
-        }
-
-        Ok(())
-    }
+/// Bind-mount `src` onto `dst` (used for `/dev/console`).
+pub(crate) fn bind_mount(src: &Path, dst: &Path) -> Result<(), MountError> {
+    mount(
+        Some(src),
+        dst,
+        None::<&str>,
+        MsFlags::MS_BIND,
+        None::<&str>,
+    )
+    .map_err(|e| syscall_err(dst, e))
 }

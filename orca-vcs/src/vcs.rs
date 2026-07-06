@@ -1,415 +1,392 @@
-use chrono::prelude::*;
-use serde::{Deserialize, Serialize};
-use sha1::{Digest, Sha1};
-use std::fs::{self, File};
-use std::io::{self, BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
-use thiserror::Error;
+//! [`Vcs`]: the version-control operations over [`CommitsData`].
 
-#[derive(Debug)]
-pub struct VCS {
-    commits_file_path: PathBuf,
-    commits_data: CommitsData,
-}
+use std::collections::HashSet;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct CommitsData {
-    commits: Vec<Commit>,
-    head: Head,
-    branches: Vec<Branch>,
-}
+use orca_hash::{Hash, to_hex};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct Head {
-    branch_name: String,
-    commit_id: String,
-    detached: bool,
-}
+use crate::data::{CommitsData, Head};
+use crate::{Commit, VcsError};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct Branch {
-    name: String,
-    commit_id: String,
-}
+/// Stateless operations over a [`CommitsData`] graph.
+///
+/// All methods mutate the in-memory graph only; persisting the result
+/// (and any layer-store side effects) is the caller's responsibility.
+/// Preconditions that involve the environment (no running container,
+/// empty `diff/`) are checked by the caller (`Workspace` in the `orca`
+/// crate), not here.
+pub struct Vcs;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Commit {
-    pub id: String,
-    parent_id: Option<String>,
-    pub date: String,
-    pub message: Option<String>,
-}
-
-#[derive(Debug)]
-pub struct CommitsIter<T> {
-    commits: Vec<T>,
-    head_id: Option<String>,
-}
-
-#[allow(clippy::upper_case_acronyms)]
-#[derive(Debug)]
-enum CommitQuery<T> {
-    HEAD,
-    Branch(T),
-    CommitID(T),
-    Other(T),
-}
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("Not initialized")]
-    NotInitialized,
-
-    #[error("Cannot operate to commits file")]
-    FileOperationError(#[from] io::Error),
-
-    #[error("Commits files is invalid format")]
-    InvalidFormat,
-
-    #[error("Cannot commit with detached HEAD")]
-    DetachedHEAD,
-
-    #[error("Specified branch name already exists")]
-    BranchAllreadyExits,
-
-    #[error("Specified commit was not found")]
-    CommitNotFound,
-
-    #[error("Specified commit id matches more than one commits")]
-    AmbigousQuery,
-}
-
-const DEFAULT_BRANCH: &str = "main";
-pub type Result<T> = std::result::Result<T, Error>;
-
-impl VCS {
-    pub fn new<P: Into<PathBuf>>(commits_file_path: P) -> Result<Self> {
-        let commits_file_path = commits_file_path.into();
-        if !commits_file_path.exists() {
-            Err(Error::NotInitialized)?;
-        }
-        let mut commits_file = File::open(&commits_file_path)?;
-        let mut buf = String::new();
-        commits_file.read_to_string(&mut buf)?;
-        let commits_data: CommitsData = toml::from_str(&buf).or(Err(Error::InvalidFormat))?;
-
-        Ok(Self {
-            commits_file_path,
-            commits_data,
-        })
-    }
-
-    pub fn init<P: Into<PathBuf>>(commits_file_path: P) -> Result<()> {
-        let commits_file_path = commits_file_path.into();
-        let commits_data = CommitsData::new();
-
-        let commits_file_dir = commits_file_path.parent();
-        if let Some(commits_file_dir) = commits_file_dir {
-            if !commits_file_dir.exists() {
-                fs::create_dir_all(commits_file_dir)?;
-            }
-        }
-        write_commit_data_to_file(&commits_file_path, &commits_data)?;
-
-        Ok(())
-    }
-
-    pub fn commit<S>(&mut self, message: Option<S>) -> Result<&Commit>
-    where
-        S: ToString,
-    {
-        let head_commit = self.commits_data.get_commit_by(CommitQuery::<&str>::HEAD);
-        let parent_id = match head_commit {
-            Ok(commit) => Some(commit.id.clone()),
-            Err(Error::CommitNotFound) => None,
-            Err(_) => {
-                panic!("Multiple commits have the same commit id, or HEAD is invalid")
-            }
+impl Vcs {
+    /// Append `commit` to the graph and advance the current branch to it.
+    ///
+    /// Returns [`VcsError::DetachedHead`] if HEAD is not on a branch
+    /// (committing in detached HEAD is not allowed).
+    pub fn commit(data: &mut CommitsData, commit: Commit) -> Result<(), VcsError> {
+        let Head::Branch(name) = data.head.clone() else {
+            return Err(VcsError::DetachedHead);
         };
-        let new_commit = Commit::new(parent_id, message);
-
-        // TODO: DB
-        // let mut current_tag = self.commits_data.get_current_tag().ok_or(VCSError::DetachedHEAD)?;
-        // current_tag.commit_id = new_commit.id.clone();
-        // self.commits_data.update_tag(current_tag);
-        //
-        self.commits_data
-            .get_current_branch_mut()
-            .ok_or(Error::DetachedHEAD)?
-            .commit_id = new_commit.id.clone();
-        self.commits_data.head.commit_id = new_commit.id.clone();
-        self.commits_data.add_commit(new_commit);
-
-        write_commit_data_to_file(&self.commits_file_path, &self.commits_data)?;
-
-        Ok(self
-            .commits_data
-            .get_commit_by(CommitQuery::<&str>::HEAD)
-            .unwrap())
-    }
-
-    pub fn get_current_commits(&self) -> Result<CommitsIter<&Commit>> {
-        self.commits_data.get_commits_by(CommitQuery::<&str>::HEAD)
-    }
-
-    pub fn get_current_branch(&self) -> &str {
-        self.commits_data
-            .get_current_branch()
-            .unwrap()
-            .name
-            .as_str()
-    }
-
-    pub fn get_all_branches(&self) -> Vec<&str> {
-        self.commits_data
-            .get_all_branches()
-            .iter()
-            .map(|tag| tag.name.as_str())
-            .collect()
-    }
-
-    pub fn create_branch<S: ToString>(&mut self, name: S) -> anyhow::Result<()> {
-        if self
-            .commits_data
-            .get_all_branches()
-            .iter()
-            .any(|tag| tag.name == name.to_string())
-        {
-            Err(Error::BranchAllreadyExits)?;
-        }
-
-        let latest_commit_id = self
-            .commits_data
-            .get_commit_by(CommitQuery::<&str>::HEAD)
-            .map_or(String::from("none"), |commit| commit.id.clone());
-        self.commits_data.add_branch(name, latest_commit_id);
-
-        write_commit_data_to_file(&self.commits_file_path, &self.commits_data)?;
-        Ok(())
-    }
-
-    pub fn delete_branch<S: ToString>(&mut self, _name: S) {
-        unimplemented!();
-    }
-
-    pub fn checkout<S: ToString>(&mut self, query: S) -> Result<()> {
-        let commit_query = create_commit_query_from(query, &self.commits_data);
-        let commit = self.commits_data.get_commit_by(commit_query.clone())?;
-        self.commits_data.head.commit_id = commit.id.clone();
-        match commit_query {
-            CommitQuery::Branch(tag) => {
-                self.commits_data.head.branch_name = tag;
-                self.commits_data.head.detached = false;
-            }
-            CommitQuery::CommitID(_) => self.commits_data.head.detached = true,
-            _ => {}
-        }
-        write_commit_data_to_file(&self.commits_file_path, &self.commits_data)?;
-        Ok(())
-    }
-}
-
-fn write_commit_data_to_file<P: AsRef<Path>>(
-    file_path: P,
-    commits_data: &CommitsData,
-) -> std::result::Result<(), io::Error> {
-    let commits_toml = toml::to_string(commits_data).unwrap();
-    let commits_file = File::create(file_path)?;
-    let mut writer = BufWriter::new(commits_file);
-    writer.write_all(commits_toml.as_bytes())?;
-    Ok(())
-}
-
-fn create_commit_query_from<S: ToString>(
-    query: S,
-    commits_data: &CommitsData,
-) -> CommitQuery<String> {
-    let query = query.to_string();
-    if query == "HEAD" {
-        CommitQuery::HEAD
-    } else if commits_data
-        .get_all_branches()
-        .iter()
-        .any(|tag| tag.name.as_str() == query)
-    {
-        CommitQuery::Branch(query)
-    } else {
-        CommitQuery::CommitID(query)
-    }
-}
-
-impl CommitsData {
-    fn new() -> Self {
-        let head = Head {
-            branch_name: DEFAULT_BRANCH.to_string(),
-            commit_id: "None".to_string(),
-            detached: false,
-        };
-        let tags = vec![Branch {
-            name: DEFAULT_BRANCH.to_string(),
-            commit_id: "None".to_string(),
-        }];
-        Self {
-            commits: vec![],
-            head,
-            branches: tags,
-        }
-    }
-
-    fn add_commit(&mut self, commit: Commit) {
-        self.commits.push(commit);
-    }
-
-    fn add_branch<S1, S2>(&mut self, name: S1, commit_id: S2)
-    where
-        S1: ToString,
-        S2: ToString,
-    {
-        self.branches.push(Branch {
-            name: name.to_string(),
-            commit_id: commit_id.to_string(),
-        })
-    }
-
-    fn get_current_branch(&self) -> Option<&Branch> {
-        if self.head.detached {
-            return None;
-        }
-        self.branches
-            .iter()
-            .find(|tag| tag.name.as_str() == self.head.branch_name.as_str())
-    }
-
-    fn get_current_branch_mut(&mut self) -> Option<&mut Branch> {
-        if self.head.detached {
-            return None;
-        }
-        self.branches
-            .iter_mut()
-            .find(|tag| tag.name.as_str() == self.head.branch_name.as_str())
-    }
-
-    fn get_all_branches(&self) -> &Vec<Branch> {
-        &self.branches
-    }
-
-    fn get_commit_by<S: AsRef<str>>(&self, query: CommitQuery<S>) -> Result<&Commit> {
-        let commit_id = get_commit_id_from_query(self, query).ok_or(Error::CommitNotFound)?;
-        let commits: Vec<&Commit> = self
-            .commits
-            .iter()
-            .filter(|commit| commit.id.starts_with(&commit_id))
-            .collect();
-        match commits.len() {
-            1 => Ok(commits[0]),
-            0 => Err(Error::CommitNotFound),
-            _ => Err(Error::AmbigousQuery),
-        }
-    }
-
-    fn get_commits_by<S: AsRef<str>>(&self, query: CommitQuery<S>) -> Result<CommitsIter<&Commit>> {
-        let commit = self.get_commit_by(query)?;
-        let head_id = commit.id.to_string();
-        Ok(CommitsIter {
-            commits: self.commits.iter().collect(),
-            head_id: Some(head_id),
-        })
-    }
-}
-
-fn get_commit_id_from_query<S: AsRef<str>>(
-    commits_data: &CommitsData,
-    query: CommitQuery<S>,
-) -> Option<String> {
-    match query {
-        CommitQuery::HEAD => Some(commits_data.head.commit_id.clone()),
-        CommitQuery::Branch(tag_name) => commits_data
+        let branch = data
             .branches
-            .iter()
-            .find(|tag| tag.name.as_str() == tag_name.as_ref())
-            .map(|branch| branch.commit_id.clone()),
-        CommitQuery::CommitID(id) => Some(id.as_ref().to_string()),
-        CommitQuery::Other(query) => {
-            match get_commit_id_from_query(commits_data, CommitQuery::Branch(query.as_ref())) {
-                Some(commit_id) => Some(commit_id),
-                None => {
-                    get_commit_id_from_query(commits_data, CommitQuery::CommitID(query.as_ref()))
+            .iter_mut()
+            .find(|b| b.name == name)
+            .ok_or(VcsError::BranchNotFound(name))?;
+        branch.commit = commit.hash;
+        data.commits.push(commit);
+        Ok(())
+    }
+
+    /// Move HEAD to `target`.
+    ///
+    /// `Head::Branch` must name an existing branch; `Head::Detached` must
+    /// reference an existing commit. The caller (`Workspace::checkout`)
+    /// resolves user input (branch / hash / `ROOT`) into a [`Head`].
+    pub fn checkout(data: &mut CommitsData, target: &Head) -> Result<(), VcsError> {
+        match target {
+            Head::Branch(name) => {
+                if data.branch(name).is_none() {
+                    return Err(VcsError::BranchNotFound(name.clone()));
+                }
+            }
+            Head::Detached(hash) => {
+                if data.find(hash).is_none() {
+                    return Err(VcsError::CommitNotFound(to_hex(hash)));
                 }
             }
         }
+        data.head = target.clone();
+        Ok(())
     }
-}
 
-impl Commit {
-    fn new<S1, S2>(parent_id: Option<S1>, message: Option<S2>) -> Self
-    where
-        S1: ToString,
-        S2: ToString,
-    {
-        let now = Local::now().to_string();
-        let mut hasher = Sha1::new();
-        hasher.update(&now);
-        let id = hasher
-            .finalize()
-            .iter()
-            .map(|data| format!("{:02x}", data))
-            .collect::<String>();
-
-        Self {
-            id,
-            date: now,
-            message: message.map(|s| s.to_string()),
-            parent_id: parent_id.map(|s| s.to_string()),
+    /// Hard reset: move the branch HEAD points at to `target`.
+    ///
+    /// Returns [`VcsError::DetachedHead`] when HEAD is detached (reset
+    /// moves a branch pointer; use checkout to move a detached HEAD).
+    pub fn reset(data: &mut CommitsData, target: &Commit) -> Result<(), VcsError> {
+        let target_hash = *target.hash();
+        if data.find(&target_hash).is_none() {
+            return Err(VcsError::CommitNotFound(to_hex(&target_hash)));
         }
+        let Head::Branch(name) = data.head.clone() else {
+            return Err(VcsError::DetachedHead);
+        };
+        let branch = data
+            .branches
+            .iter_mut()
+            .find(|b| b.name == name)
+            .ok_or(VcsError::BranchNotFound(name))?;
+        branch.commit = target_hash;
+        Ok(())
     }
-}
 
-impl AsRef<Commit> for Commit {
-    fn as_ref(&self) -> &Commit {
-        self
-    }
-}
-
-impl<T: AsRef<Commit>> Iterator for CommitsIter<T> {
-    type Item = T;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.commits.is_empty() {
-            return None;
+    /// Create a branch named `name` at the current HEAD commit.
+    pub fn branch_create(data: &mut CommitsData, name: &str) -> Result<(), VcsError> {
+        if data.branch(name).is_some() {
+            return Err(VcsError::BranchExists(name.to_string()));
         }
-        let head_id = self.head_id.as_ref()?;
-        let target_index = self
-            .commits
-            .iter()
-            .position(|commit| commit.as_ref().id.as_str() == head_id)?;
-        let target_commit = self.commits.swap_remove(target_index);
-        self.head_id = target_commit.as_ref().parent_id.clone();
-        Some(target_commit)
-    }
-}
-
-#[allow(dead_code)]
-impl<T> CommitQuery<T> {
-    pub fn is_head(&self) -> bool {
-        matches!(self, CommitQuery::HEAD)
+        let commit = data.head_commit_hash();
+        data.branches.push(crate::data::Branch {
+            name: name.to_string(),
+            commit,
+        });
+        Ok(())
     }
 
-    pub fn is_tag(&self) -> bool {
-        matches!(self, CommitQuery::Branch(_))
-    }
-
-    pub fn is_commit(&self) -> bool {
-        matches!(self, CommitQuery::CommitID(_))
-    }
-}
-
-impl<T: Clone> Clone for CommitQuery<T> {
-    fn clone(&self) -> Self {
-        match self {
-            CommitQuery::HEAD => CommitQuery::HEAD,
-            CommitQuery::Branch(t) => CommitQuery::Branch(t.clone()),
-            CommitQuery::CommitID(c) => CommitQuery::CommitID(c.clone()),
-            CommitQuery::Other(q) => CommitQuery::Other(q.clone()),
+    /// Delete the branch named `name`.
+    ///
+    /// The branch HEAD currently follows cannot be deleted.
+    pub fn branch_delete(data: &mut CommitsData, name: &str) -> Result<(), VcsError> {
+        if data.branch(name).is_none() {
+            return Err(VcsError::BranchNotFound(name.to_string()));
         }
+        if data.head == Head::Branch(name.to_string()) {
+            return Err(VcsError::BranchInUse(name.to_string()));
+        }
+        data.branches.retain(|b| b.name != name);
+        Ok(())
+    }
+
+    /// Rebase branch `target` onto branch `newbase`.
+    ///
+    /// Pure pointer surgery: the oldest commit of `target` past the common
+    /// ancestor gets its first parent redirected to `newbase`'s tip, and
+    /// `newbase` is advanced to `target`'s tip. Hashes are never
+    /// recomputed and no layer is renamed (see DESIGN §6). Shared commits
+    /// must not be rebased — the parent rewrite would leak into other
+    /// branches referencing them.
+    pub fn rebase(data: &mut CommitsData, newbase: &str, target: &str) -> Result<(), VcsError> {
+        let newbase_tip = *data
+            .branch(newbase)
+            .ok_or_else(|| VcsError::BranchNotFound(newbase.to_string()))?
+            .commit_hash();
+        let target_tip = *data
+            .branch(target)
+            .ok_or_else(|| VcsError::BranchNotFound(target.to_string()))?
+            .commit_hash();
+
+        let lca = Self::find_lca(data, &newbase_tip, &target_tip)?;
+        if target_tip == lca {
+            // target has nothing beyond the common ancestor.
+            return Err(VcsError::NothingToRebase {
+                target: target.to_string(),
+                newbase: newbase.to_string(),
+            });
+        }
+
+        if newbase_tip != lca {
+            // Find the oldest commit on target's first-parent chain past
+            // the LCA and re-parent it onto newbase's tip.
+            let mut cursor = target_tip;
+            let first_after_lca = loop {
+                let commit = data
+                    .find(&cursor)
+                    .ok_or_else(|| VcsError::CommitNotFound(to_hex(&cursor)))?;
+                match commit.parent.first() {
+                    Some(parent) if *parent == lca => break cursor,
+                    Some(parent) => cursor = *parent,
+                    None => {
+                        return Err(VcsError::NoCommonAncestor(
+                            newbase.to_string(),
+                            target.to_string(),
+                        ));
+                    }
+                }
+            };
+            let commit = data
+                .commits
+                .iter_mut()
+                .find(|c| c.hash == first_after_lca)
+                .expect("commit existence checked above");
+            commit.parent[0] = newbase_tip;
+        }
+        // Advance newbase to target's tip (fast-forward when newbase == lca).
+        let branch = data
+            .branches
+            .iter_mut()
+            .find(|b| b.name == newbase)
+            .expect("branch existence checked above");
+        branch.commit = target_tip;
+        Ok(())
+    }
+
+    /// Reserved for the future `orca merge`; always returns
+    /// [`VcsError::MergeUnimplemented`].
+    pub fn merge(_data: &mut CommitsData, _target: &str) -> Result<(), VcsError> {
+        Err(VcsError::MergeUnimplemented)
+    }
+
+    /// Lowest common ancestor of two commits along first-parent chains.
+    pub fn find_lca(data: &CommitsData, a: &Hash, b: &Hash) -> Result<Hash, VcsError> {
+        let mut ancestors = HashSet::new();
+        let mut cursor = Some(*a);
+        while let Some(hash) = cursor {
+            ancestors.insert(hash);
+            cursor = data.find(&hash).and_then(|c| c.parent.first().copied());
+        }
+        let mut cursor = Some(*b);
+        while let Some(hash) = cursor {
+            if ancestors.contains(&hash) {
+                return Ok(hash);
+            }
+            cursor = data.find(&hash).and_then(|c| c.parent.first().copied());
+        }
+        Err(VcsError::NoCommonAncestor(to_hex(a), to_hex(b)))
+    }
+
+    /// Mark-and-sweep garbage collection (pure, no I/O).
+    ///
+    /// Roots are every branch tip plus the current HEAD (including a
+    /// detached HEAD — otherwise the checked-out commit would be swept).
+    /// Returns the cleaned graph and the layer hashes of removed commits;
+    /// deleting those layer directories is the caller's job
+    /// (`Workspace::gc` → `LayerStore::delete`).
+    pub fn gc(data: CommitsData) -> (CommitsData, Vec<Hash>) {
+        let reachable = data.reachable();
+        let mut kept = Vec::new();
+        let mut dead_layers = Vec::new();
+        for commit in data.commits {
+            if reachable.contains(&commit.hash) {
+                kept.push(commit);
+            } else if let Some(layer) = commit.layer {
+                dead_layers.push(layer);
+            }
+        }
+        (
+            CommitsData {
+                head: data.head,
+                branches: data.branches,
+                commits: kept,
+            },
+            dead_layers,
+        )
     }
 }
-impl<T: Copy> Copy for CommitQuery<T> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CommitBuilder;
+
+    /// Append a commit with a synthetic layer hash on the current branch.
+    fn add_commit(data: &mut CommitsData, msg: &str) -> Hash {
+        struct Marker(&'static str, u64);
+        impl orca_hash::Hashable for Marker {
+            fn hash(&self, h: &mut dyn orca_hash::Hasher) {
+                h.update_framed(self.0.as_bytes());
+                h.update(&self.1.to_le_bytes());
+            }
+        }
+        let parent = data.current_commit().unwrap().hash;
+        let marker = Marker("layer", data.all_commits().count() as u64);
+        let commit = CommitBuilder::new()
+            .parent(parent)
+            .message(msg)
+            .data(&marker)
+            .timestamp_now()
+            .build()
+            .unwrap();
+        let hash = commit.hash;
+        Vcs::commit(data, commit).unwrap();
+        hash
+    }
+
+    #[test]
+    fn commit_advances_branch() {
+        let mut data = CommitsData::new();
+        let hash = add_commit(&mut data, "first");
+        assert_eq!(data.head().commit_hash(), hash);
+        assert_eq!(data.head().commits().count(), 2);
+    }
+
+    #[test]
+    fn commit_rejected_in_detached_head() {
+        let mut data = CommitsData::new();
+        let root = *data.root().hash();
+        Vcs::checkout(&mut data, &Head::Detached(root)).unwrap();
+        let commit = CommitBuilder::new().parent(root).timestamp_now().build().unwrap();
+        assert!(matches!(
+            Vcs::commit(&mut data, commit),
+            Err(VcsError::DetachedHead)
+        ));
+    }
+
+    #[test]
+    fn reset_moves_branch_and_rejects_detached() {
+        let mut data = CommitsData::new();
+        let first = add_commit(&mut data, "first");
+        add_commit(&mut data, "second");
+        let target = data.find(&first).unwrap().clone();
+        Vcs::reset(&mut data, &target).unwrap();
+        assert_eq!(data.head().commit_hash(), first);
+
+        Vcs::checkout(&mut data, &Head::Detached(first)).unwrap();
+        assert!(matches!(
+            Vcs::reset(&mut data, &target),
+            Err(VcsError::DetachedHead)
+        ));
+    }
+
+    #[test]
+    fn branch_lifecycle() {
+        let mut data = CommitsData::new();
+        Vcs::branch_create(&mut data, "dev").unwrap();
+        assert!(matches!(
+            Vcs::branch_create(&mut data, "dev"),
+            Err(VcsError::BranchExists(_))
+        ));
+        assert!(matches!(
+            Vcs::branch_delete(&mut data, "main"),
+            Err(VcsError::BranchInUse(_))
+        ));
+        Vcs::branch_delete(&mut data, "dev").unwrap();
+        assert!(matches!(
+            Vcs::branch_delete(&mut data, "dev"),
+            Err(VcsError::BranchNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn rebase_reparents_and_advances_newbase() {
+        // main: root -> B -> C ; dev: root -> B -> D -> E
+        let mut data = CommitsData::new();
+        let _b = add_commit(&mut data, "B");
+        Vcs::branch_create(&mut data, "dev").unwrap();
+        let c = add_commit(&mut data, "C");
+        Vcs::checkout(&mut data, &Head::Branch("dev".into())).unwrap();
+        let d = add_commit(&mut data, "D");
+        let e = add_commit(&mut data, "E");
+
+        // rebase main dev -> main: root B C D E
+        Vcs::rebase(&mut data, "main", "dev").unwrap();
+        assert_eq!(*data.branch("main").unwrap().commit_hash(), e);
+        assert_eq!(data.find(&d).unwrap().parents()[0], c);
+        let chain: Vec<String> = data
+            .branch("main")
+            .unwrap()
+            .commits()
+            .map(|c| c.message().to_string())
+            .collect();
+        assert_eq!(chain, ["E", "D", "C", "B", ""]);
+    }
+
+    #[test]
+    fn rebase_fast_forward_when_newbase_is_ancestor() {
+        // main: root -> B ; dev: root -> B -> D
+        let mut data = CommitsData::new();
+        let b = add_commit(&mut data, "B");
+        Vcs::branch_create(&mut data, "dev").unwrap();
+        Vcs::checkout(&mut data, &Head::Branch("dev".into())).unwrap();
+        let d = add_commit(&mut data, "D");
+        Vcs::rebase(&mut data, "main", "dev").unwrap();
+        assert_eq!(*data.branch("main").unwrap().commit_hash(), d);
+        // D's parent is untouched (no re-parent needed).
+        assert_eq!(data.find(&d).unwrap().parents()[0], b);
+    }
+
+    #[test]
+    fn rebase_nothing_to_do() {
+        let mut data = CommitsData::new();
+        add_commit(&mut data, "B");
+        Vcs::branch_create(&mut data, "dev").unwrap();
+        // dev == main tip; rebasing dev onto main has nothing to move.
+        assert!(matches!(
+            Vcs::rebase(&mut data, "main", "dev"),
+            Err(VcsError::NothingToRebase { .. })
+        ));
+    }
+
+    #[test]
+    fn gc_sweeps_unreachable_and_keeps_detached_head() {
+        let mut data = CommitsData::new();
+        let first = add_commit(&mut data, "first");
+        let second = add_commit(&mut data, "second");
+        // Move main back to first; second becomes unreachable.
+        let target = data.find(&first).unwrap().clone();
+        Vcs::reset(&mut data, &target).unwrap();
+        let (cleaned, dead) = Vcs::gc(data);
+        assert!(cleaned.find(&second).is_none());
+        assert_eq!(dead, vec![second]);
+
+        // Detached HEAD keeps its commit alive.
+        let mut data = CommitsData::new();
+        let first = add_commit(&mut data, "first");
+        Vcs::checkout(&mut data, &Head::Detached(first)).unwrap();
+        let root = *data.root().hash();
+        let target = data.find(&root).unwrap().clone();
+        // Move main back to root via a temporary checkout.
+        Vcs::checkout(&mut data, &Head::Branch("main".into())).unwrap();
+        Vcs::reset(&mut data, &target).unwrap();
+        Vcs::checkout(&mut data, &Head::Detached(first)).unwrap();
+        let (cleaned, dead) = Vcs::gc(data);
+        assert!(cleaned.find(&first).is_some());
+        assert!(dead.is_empty());
+    }
+
+    #[test]
+    fn head_serializes_as_single_string() {
+        let data = CommitsData::new();
+        let toml = toml::to_string(&data).unwrap();
+        assert!(toml.contains("head = \"branch:main\""));
+        let parsed: CommitsData = toml::from_str(&toml).unwrap();
+        assert_eq!(parsed.head().branch_name(), Some("main"));
+    }
+}

@@ -1,15 +1,32 @@
 [package]
 name = "orca"
 version.workspace = true
-authors.workspace = true
 edition.workspace = true
-description.workspace = true
-license-file.workspace = true
+license.workspace = true
+description = "A container environment manager with Git-like version control"
 
 [dependencies]
-clap = { version = "4.5", features = ["derive", "string"] }
-anyhow = "1.0"
-nix = { version = "0.30", features = ["user"] }
-walkdir = "2.5"
-orca-vcs = { path = "../orca-vcs" }
-orca-container = { path = "../orca-container" }
+orca-container.workspace = true
+orca-hash.workspace = true
+orca-image.workspace = true
+orca-vcs.workspace = true
+
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+dirs.workspace = true
+libc.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+uuid.workspace = true
+xattr.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "orca"
+path = "src/main.rs"
