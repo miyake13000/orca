@@ -399,7 +399,7 @@ mod tests {
         std::os::unix::fs::symlink("sub/file", src.join("link")).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(
-            &src.join("sub/file"),
+            src.join("sub/file"),
             std::fs::Permissions::from_mode(0o640),
         )
         .unwrap();

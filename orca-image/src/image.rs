@@ -11,41 +11,32 @@ use std::path::PathBuf;
 
 use crate::layer::{Layer, Upper};
 
-/// Runtime defaults derived from the image (or host) used to resolve the
-/// container's argv / env / working directory.
+/// Static runtime defaults *declared by the image*.
+///
+/// This is pure image data: for pulled images it comes from the OCI config
+/// (via `images.toml`); host-based environments declare nothing, so their
+/// config is [`ImageConfig::default`] (empty). The process environment is
+/// never consulted here — resolving the actual argv / env / cwd for a run
+/// is policy and lives in the `orca` crate (`ExecSpec`).
 #[derive(Debug, Clone)]
 pub struct ImageConfig {
-    /// OCI entrypoint (empty for host-based environments).
+    /// OCI entrypoint (empty when the image declares none).
     pub entrypoint: Vec<String>,
-    /// OCI cmd (`["/bin/bash"]` for host-based environments).
+    /// OCI cmd (empty when the image declares none).
     pub cmd: Vec<String>,
     /// Environment variables as `KEY=VALUE` strings.
     pub env: Vec<String>,
-    /// Initial working directory (falls back to `/` if missing in the
-    /// container).
+    /// Declared working directory (`/` when unset).
     pub working_dir: PathBuf,
 }
 
-impl ImageConfig {
-    /// Fallback PATH used when the host has no PATH set.
-    const DEFAULT_PATH: &'static str =
-        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-
-    /// Defaults for host-based environments: no entrypoint,
-    /// `cmd=["/bin/bash"]`, env = host PATH (+ TERM if set), cwd = `/`.
-    pub fn host_default() -> Self {
-        let mut env = vec![
-            std::env::var("PATH")
-                .map(|p| format!("PATH={p}"))
-                .unwrap_or_else(|_| Self::DEFAULT_PATH.to_string()),
-        ];
-        if let Ok(term) = std::env::var("TERM") {
-            env.push(format!("TERM={term}"));
-        }
+impl Default for ImageConfig {
+    /// The empty declaration used for host-based environments.
+    fn default() -> Self {
         Self {
             entrypoint: Vec::new(),
-            cmd: vec!["/bin/bash".to_string()],
-            env,
+            cmd: Vec::new(),
+            env: Vec::new(),
             working_dir: PathBuf::from("/"),
         }
     }

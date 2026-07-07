@@ -24,7 +24,7 @@ orca run bash
 orca commit -m "install foo and its dependencies"
 
 # コンテナ環境をホストにも適用 (make install のファイルがホストにも配置)
-orca apply HEAD
+orca apply
 
 # OR 必要ないなら変更を破棄
 orca clean
@@ -38,47 +38,27 @@ orca clean
 - **ホスト rootfs 対応** — 稼働中のシステムをそのままベースにでき，セットアップ不要でコンテナを作れる
 - **ブランチ** — 並行して実験し，ブランチを自由にマージ (rebase) したり破棄したりできる
 
-## 動作要件
-
-- OverlayFS をサポートする Linux カーネル
-- root 権限 (または `CAP_SYS_ADMIN`)
 
 ## インストール
 
-```bash
-cargo install orca
-```
-
-## クイックスタート
+1. orca のダウンロード
 
 ```bash
-# ホストシステムからコンテナを作成 (デフォルト)
-orca init myenv
-
-# あるいは Docker イメージから
-orca init myenv --image ubuntu:24.04
-
-# コンテナに入る
-orca run
-
-# 変更を加えてコミット
-orca commit -m "installed build dependencies"
-
-# 履歴を見る
-orca log
-
-# 危険な実験用にブランチを切る
-orca branch experiment
-orca checkout experiment
-orca run bash
-orca commit -m "tried the risky thing"
-
-# rebase で取り込む (あるいはブランチごと捨てる)
-orca checkout main
-orca rebase main experiment
+wget https://github.com/miyake13000/orca/releases/latest/download/orca
 ```
 
-## CLI リファレンス
+2. orca に root 権限 (sudo または setuid) を付与
+    - setuid の場合(推奨): `sudo chown root:root orca && sudo chmod 4755 orca`
+    - sudo の場合: `echo "alias orca='sudo \$(which orca)'" >> ~/.bashrc && source ~/.bashrc`
+
+|                    | setuid              | sudo                      |
+| ------------------ | ------------------- | ------------------------- |
+| 環境変数            | 維持                 | リセット (`sudo -E` で維持) |
+| `orca run` のユーザ | 現在のユーザ          | root (`orca run --user $(id -u) --group $(id -g)`で維持) |
+| データ保存場所       | `$HOME/.local/share/orca` | `/root/.local/share/orca` |
+
+
+## コマンド仕様
 
 ### グローバルオプション
 
@@ -115,6 +95,8 @@ orca [--env <name-or-uuid>] <command> [args]
 | `orca run <cmd> [args]` | コンテナ内で指定したコマンドを実行 |
 | `orca run --no-pid` / `--no-uts` / `--no-ipc` | PID / UTS / IPC namespace の分離を無効化 |
 | `orca run --network` | network namespace を分離 (デフォルトはホストと共有) |
+| `orca run --user <uid\|name>` | コンテナ内の実行ユーザを指定 |
+| `orca run --group <gid\|name>` | コンテナ内の実行グループを指定 |
 
 ### バージョン管理
 
@@ -134,7 +116,7 @@ orca [--env <name-or-uuid>] <command> [args]
 | `orca merge <branch>` | ブランチをマージ (未実装) |
 | `orca gc` | 到達不能なコミットとオブジェクトを削除 |
 
-> `checkout` / `reset` の対象には `ROOT` を指定できる — parent を持たない初期コミットに解決される．
+> `checkout` / `reset` の対象には `ROOT` (初期コミット，`initial commit`) を指定できる
 
 ### apply
 
@@ -159,12 +141,12 @@ orca [--env <name-or-uuid>] <command> [args]
 
 ## 制限事項
 
-- Linux 専用 (OverlayFS は Linux カーネルの機能)
-- root または `CAP_SYS_ADMIN` が必要
-- コンテナあたりのコミット済みレイヤは最大 500 (OverlayFS のカーネル制限)
-- ホスト上で別マウントされているファイルシステム (別パーティションの `/home` など) は，ホストベースのコンテナからは見えない (OverlayFS の lower レイヤはマウントポイントを跨がないため)
+- Linux 専用
+- root 権限が必要 (sudo または setuid)
+- コンテナあたりのコミット済みレイヤは最大 500 (OverlayFS の制限)
+- ホスト上で別マウントされているファイルシステム (別パーティションの `/home` など) は，ホストベースのコンテナからは見えない
 - `orca merge` は未実装．代わりに `orca rebase <newbase> <target>` を使う (target を newbase に rebase)
-- 同一コンテナへの並行アクセスは非サポート
+- 同一コンテナへの並行アクセスは未サポート
 
 ## ライセンス
 

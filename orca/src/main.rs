@@ -69,6 +69,14 @@ enum Command {
         /// Isolate the network namespace (shared with host by default)
         #[arg(long)]
         network: bool,
+        /// Run as this user inside the container (uid or name).
+        /// Default: the invoking user under a setuid install, root
+        /// under sudo
+        #[arg(long)]
+        user: Option<String>,
+        /// Run with this group inside the container (gid or name)
+        #[arg(long)]
+        group: Option<String>,
         /// Command and arguments (defaults to the image command)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         cmd: Vec<String>,
@@ -196,6 +204,8 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             no_uts,
             no_ipc,
             network,
+            user,
+            group,
             cmd,
         } => {
             let env = cli::select_env(&store, &cli.env)?;
@@ -206,6 +216,8 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     no_uts,
                     no_ipc,
                     network,
+                    user,
+                    group,
                     cmd,
                 },
             );

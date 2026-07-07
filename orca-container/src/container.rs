@@ -104,6 +104,23 @@ pub enum IoMode {
     Piped,
 }
 
+/// The identity the container process drops to right before `exec`.
+///
+/// A resolved input on par with [`NamespaceOpts`]: deciding *who* to run
+/// as is policy (the `orca` crate's `ExecSpec`); this crate merely
+/// executes `setgroups(groups)` → `setresgid(gid)` → `setresuid(uid)` in
+/// the child (uid last, saved ids included, so the drop is complete and
+/// shells do not enter their setuid security mode).
+#[derive(Debug, Clone)]
+pub struct RunAs {
+    /// Real/effective/saved uid to become.
+    pub uid: u32,
+    /// Real/effective/saved gid to become.
+    pub gid: u32,
+    /// Supplementary groups (from the host group database).
+    pub groups: Vec<u32>,
+}
+
 /// Marker state: configured but not started.
 pub struct Created;
 
@@ -131,6 +148,7 @@ pub struct Container<S> {
     cmd: Vec<String>,
     env: Vec<String>,
     cwd: PathBuf,
+    run_as: Option<RunAs>,
     hostname: Option<String>,
     state: S,
 }
@@ -183,6 +201,7 @@ impl Container<Created> {
             cmd: &self.cmd,
             env: &self.env,
             cwd: &self.cwd,
+            run_as: self.run_as.as_ref(),
             hostname: self.hostname.as_deref(),
             set_hostname: self.opts.uts,
             status_fd: status_w.as_raw_fd(),
@@ -242,6 +261,7 @@ impl Container<Created> {
             cmd: self.cmd,
             env: self.env,
             cwd: self.cwd,
+            run_as: self.run_as,
             hostname: self.hostname,
             state: Running {
                 child_pid,
@@ -273,6 +293,7 @@ impl Container<Running> {
             cmd: self.cmd,
             env: self.env,
             cwd: self.cwd,
+            run_as: self.run_as,
             hostname: self.hostname,
             state: Terminated { status },
         })
@@ -317,22 +338,25 @@ fn build_clone_flags(opts: &NamespaceOpts) -> CloneFlags {
 }
 
 /// Builder assembling a [`Container<Created>`]. `build()` has no side
-/// effects; argv/env/cwd are resolved here from the image config plus
-/// explicit overrides.
+/// effects and performs validation only: argv / env / cwd / run_as arrive
+/// here already resolved by the `orca` crate's `ExecSpec` (policy); this
+/// builder never consults the image config or the process environment.
 pub struct ContainerBuilder {
     image: Image,
     session: SessionPaths,
     opts: NamespaceOpts,
     io: IoMode,
     cmd: Option<Vec<String>>,
-    extra_env: Vec<String>,
+    env: Vec<String>,
+    cwd: Option<PathBuf>,
+    run_as: Option<RunAs>,
     hostname: Option<String>,
 }
 
 impl ContainerBuilder {
     /// Start building a container for `image` with session paths prepared
     /// by the caller. Defaults: pid/uts/ipc unshared, network shared,
-    /// piped IO.
+    /// piped IO, empty env, cwd `/`, no privilege drop.
     pub fn new(image: Image, session: SessionPaths) -> Self {
         Self {
             image,
@@ -340,7 +364,9 @@ impl ContainerBuilder {
             opts: NamespaceOpts::default(),
             io: IoMode::Piped,
             cmd: None,
-            extra_env: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+            run_as: None,
             hostname: None,
         }
     }
@@ -375,15 +401,29 @@ impl ContainerBuilder {
         self
     }
 
-    /// Override the command (otherwise the image's `entrypoint + cmd`).
+    /// Set the resolved argv (required; `ExecSpec` supplies it).
     pub fn cmd(mut self, cmd: Vec<String>) -> Self {
         self.cmd = Some(cmd);
         self
     }
 
-    /// Add an environment variable (overrides the image's on conflict).
-    pub fn env(mut self, key: &str, value: &str) -> Self {
-        self.extra_env.push(format!("{key}={value}"));
+    /// Set the resolved environment (`KEY=VALUE` list, passed verbatim).
+    pub fn env(mut self, env: Vec<String>) -> Self {
+        self.env = env;
+        self
+    }
+
+    /// Set the resolved working directory (falls back to `/` inside the
+    /// container if it does not exist there).
+    pub fn cwd(mut self, cwd: PathBuf) -> Self {
+        self.cwd = Some(cwd);
+        self
+    }
+
+    /// Drop to this identity right before `exec` (default: stay as the
+    /// invoking credentials, i.e. root).
+    pub fn run_as(mut self, run_as: RunAs) -> Self {
+        self.run_as = Some(run_as);
         self
     }
 
@@ -394,31 +434,13 @@ impl ContainerBuilder {
         self
     }
 
-    /// Resolve argv / env / cwd and produce a [`Container<Created>`].
-    /// No side effects. Fails with [`ContainerError::EmptyCommand`] if
-    /// neither the caller nor the image supplies a command.
+    /// Validate and produce a [`Container<Created>`]. No side effects, no
+    /// resolution. Fails with [`ContainerError::EmptyCommand`] if no
+    /// command was set.
     pub fn build(self) -> Result<Container<Created>, ContainerError> {
-        let config = self.image.config();
         let cmd = match self.cmd {
             Some(c) if !c.is_empty() => c,
-            _ => {
-                let mut argv = config.entrypoint.clone();
-                argv.extend(config.cmd.clone());
-                argv
-            }
-        };
-        if cmd.is_empty() {
-            return Err(ContainerError::EmptyCommand);
-        }
-        let mut env = merge_env(&config.env, &self.extra_env);
-        if self.io == IoMode::Tty && !env.iter().any(|e| e.starts_with("TERM=")) {
-            let term = std::env::var("TERM").unwrap_or_else(|_| "xterm".to_string());
-            env.push(format!("TERM={term}"));
-        }
-        let cwd = if config.working_dir.as_os_str().is_empty() {
-            PathBuf::from("/")
-        } else {
-            config.working_dir.clone()
+            _ => return Err(ContainerError::EmptyCommand),
         };
         Ok(Container {
             image: self.image,
@@ -426,42 +448,18 @@ impl ContainerBuilder {
             opts: self.opts,
             io: self.io,
             cmd,
-            env,
-            cwd,
+            env: self.env,
+            cwd: self.cwd.unwrap_or_else(|| PathBuf::from("/")),
+            run_as: self.run_as,
             hostname: self.hostname,
             state: Created,
         })
     }
 }
 
-/// Merge `KEY=VALUE` lists; entries in `extra` win over `base` on the same
-/// key, order otherwise preserved.
-fn merge_env(base: &[String], extra: &[String]) -> Vec<String> {
-    fn key(s: &str) -> &str {
-        s.split_once('=').map(|(k, _)| k).unwrap_or(s)
-    }
-    let mut merged: Vec<String> = base
-        .iter()
-        .filter(|b| !extra.iter().any(|e| key(e) == key(b)))
-        .cloned()
-        .collect();
-    merged.extend(extra.iter().cloned());
-    merged
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn merge_env_last_wins() {
-        let base = vec!["PATH=/usr/bin".to_string(), "TERM=vt100".to_string()];
-        let extra = vec!["TERM=xterm".to_string(), "FOO=1".to_string()];
-        assert_eq!(
-            merge_env(&base, &extra),
-            vec!["PATH=/usr/bin", "TERM=xterm", "FOO=1"]
-        );
-    }
 
     #[test]
     fn clone_flags_follow_opts() {

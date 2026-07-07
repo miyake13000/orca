@@ -1,17 +1,20 @@
-//! `orca run`: assemble the image, take the run lock, start the
+//! `orca run`: resolve the execution spec, take the run lock, start the
 //! container, and propagate its exit code.
 
 use std::io::IsTerminal;
 
-use orca::{Env, LockFile, Workspace};
+use orca::{Env, ExecSpec, Invocation, LockFile, Workspace, resolve_run_target};
 use orca_container::{ContainerBuilder, IoMode, SessionPaths};
+use orca_image::BaseImageRef;
 
-/// Namespace flags and command from the CLI.
+/// Namespace / identity flags and command from the CLI.
 pub struct RunOpts {
     pub no_pid: bool,
     pub no_uts: bool,
     pub no_ipc: bool,
     pub network: bool,
+    pub user: Option<String>,
+    pub group: Option<String>,
     pub cmd: Vec<String>,
 }
 
@@ -20,9 +23,12 @@ pub struct RunOpts {
 /// Lock lifecycle (DESIGN §5): acquired here before `Container::run`,
 /// held until after `wait()`, released explicitly. Stale locks are
 /// cleaned inside `acquire`. The container itself never sees the lock.
+///
+/// Policy resolution happens here (`Invocation` capture → run target →
+/// `ExecSpec`); the container receives only resolved values.
 pub fn run(env: &Env, opts: RunOpts) -> anyhow::Result<i32> {
     if !nix::unistd::geteuid().is_root() {
-        anyhow::bail!("orca run requires root (try sudo)");
+        anyhow::bail!("orca run requires root (try sudo, or a setuid-root install)");
     }
 
     // Assemble the image material (committed stack + base + config).
@@ -34,6 +40,23 @@ pub fn run(env: &Env, opts: RunOpts) -> anyhow::Result<i32> {
     } else {
         IoMode::Piped
     };
+
+    // Resolve who to run as and the full execution spec (argv/env/cwd).
+    let invocation = Invocation::capture()?;
+    let target = resolve_run_target(
+        &invocation,
+        opts.user.as_deref(),
+        opts.group.as_deref(),
+    )?;
+    let user_cmd = (!opts.cmd.is_empty()).then_some(opts.cmd);
+    let spec = ExecSpec::resolve(
+        matches!(env.base_ref, BaseImageRef::Host),
+        &image.config,
+        &invocation,
+        target.as_ref(),
+        user_cmd,
+        io == IoMode::Tty,
+    );
 
     let session = SessionPaths {
         base: env.session_path(),
@@ -54,9 +77,12 @@ pub fn run(env: &Env, opts: RunOpts) -> anyhow::Result<i32> {
         .unshare_uts(!opts.no_uts)
         .unshare_ipc(!opts.no_ipc)
         .unshare_net(opts.network)
-        .hostname(&env.name);
-    if !opts.cmd.is_empty() {
-        builder = builder.cmd(opts.cmd);
+        .hostname(&env.name)
+        .cmd(spec.argv)
+        .env(spec.env)
+        .cwd(spec.cwd);
+    if let Some(run_as) = spec.run_as {
+        builder = builder.run_as(run_as);
     }
 
     let result = builder.build()?.run()?.wait();

@@ -3,8 +3,10 @@
 //!
 //! Run with: `sudo -E cargo test -p orca-container -- --ignored`
 
-use orca_container::{ContainerBuilder, IoMode, SessionPaths};
+use orca_container::{ContainerBuilder, IoMode, RunAs, SessionPaths};
 use orca_image::{Base, Image, ImageConfig, Layer, Upper};
+
+const TEST_PATH: &str = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 fn session_in(dir: &std::path::Path) -> SessionPaths {
     let base = dir.join("session");
@@ -18,6 +20,15 @@ fn session_in(dir: &std::path::Path) -> SessionPaths {
     }
 }
 
+fn host_image(upper: &std::path::Path) -> Image {
+    Image {
+        upper: Upper::new(upper.to_path_buf()),
+        lower: Vec::<Layer>::new(),
+        base: Base::Host,
+        config: ImageConfig::default(),
+    }
+}
+
 #[test]
 #[ignore = "requires root (mount / clone / pivot_root)"]
 fn host_container_isolates_writes_and_propagates_exit_code() {
@@ -25,17 +36,11 @@ fn host_container_isolates_writes_and_propagates_exit_code() {
     let upper = dir.path().join("diff");
     std::fs::create_dir_all(&upper).unwrap();
 
-    let image = Image {
-        upper: Upper::new(upper.clone()),
-        lower: Vec::<Layer>::new(),
-        base: Base::Host,
-        config: ImageConfig::host_default(),
-    };
-
     let marker = "orca-container-test-marker";
-    let container = ContainerBuilder::new(image, session_in(dir.path()))
+    let container = ContainerBuilder::new(host_image(&upper), session_in(dir.path()))
         .io(IoMode::Piped)
         .hostname("itest")
+        .env(vec![TEST_PATH.into()])
         .cmd(vec![
             "/bin/sh".into(),
             "-c".into(),
@@ -73,7 +78,7 @@ fn init_failure_is_reported_not_hung() {
         upper: Upper::new(upper),
         lower: vec![Layer::new(dir.path().join("no-such-layer"))],
         base: Base::Host,
-        config: ImageConfig::host_default(),
+        config: ImageConfig::default(),
     };
     let container = ContainerBuilder::new(image, session_in(dir.path()))
         .io(IoMode::Piped)
@@ -84,4 +89,37 @@ fn init_failure_is_reported_not_hung() {
     let msg = err.to_string();
     assert!(msg.contains("initialization failed"), "got: {msg}");
     assert!(!dir.path().join("session").exists());
+}
+
+#[test]
+#[ignore = "requires root (mount / clone / pivot_root / setresuid)"]
+fn run_as_drops_all_ids_completely() {
+    let dir = tempfile::tempdir().unwrap();
+    let upper = dir.path().join("diff");
+    std::fs::create_dir_all(&upper).unwrap();
+
+    // 65534 = nobody/nogroup on common distros; the exact name does not
+    // matter since we check numeric ids only.
+    let container = ContainerBuilder::new(host_image(&upper), session_in(dir.path()))
+        .io(IoMode::Piped)
+        .env(vec![TEST_PATH.into()])
+        .run_as(RunAs {
+            uid: 65534,
+            gid: 65534,
+            groups: vec![65534],
+        })
+        .cmd(vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            // Real, effective and saved ids must all be dropped, and the
+            // 666 devices must be writable by the unprivileged user.
+            "[ \"$(id -u)\" = 65534 ] && [ \"$(id -g)\" = 65534 ] \
+             && [ \"$(id -ur)\" = 65534 ] \
+             && echo x > /dev/null && exit 9"
+                .into(),
+        ])
+        .build()
+        .unwrap();
+    let done = container.run().unwrap().wait().unwrap();
+    assert_eq!(done.status(), 9);
 }

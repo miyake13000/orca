@@ -180,7 +180,9 @@ impl<'a> Workspace<'a> {
         let head_hash = self.commits.head().commit_hash();
         let lower = self.stack_of(head_hash)?;
         let (base, config) = match &self.env.base_ref {
-            BaseImageRef::Host => (Base::Host, ImageConfig::host_default()),
+            // Host bases declare no static config; the runtime spec is
+            // resolved by ExecSpec from the invocation context.
+            BaseImageRef::Host => (Base::Host, ImageConfig::default()),
             BaseImageRef::External { image_digest } => {
                 let index = ImageIndex::load(&self.env.images_path())?;
                 let manifest = index.find_by_digest(image_digest)?;
@@ -521,10 +523,53 @@ mod tests {
         ws.commit("x").unwrap();
     }
 
+    /// Build a *guest* env whose base is a fabricated image with one
+    /// empty layer inside the tempdir. Unlike a host env (whose baseline
+    /// includes the real `/`), every path a diff consults lives in the
+    /// tempdir, keeping the test environment-independent.
+    fn setup_guest(dir: &Path) -> (EnvStore, uuid::Uuid) {
+        use orca_image::external_image::{ImageDigest, ImageManifest, LayerDigest};
+
+        let digest = ImageDigest([9; 32]);
+        let layer = LayerDigest([8; 32]);
+        let mut store = EnvStore::load(&dir.join("envs")).unwrap();
+        let uuid = {
+            let env = store
+                .create(
+                    "g".into(),
+                    BaseImageRef::External {
+                        image_digest: digest,
+                    },
+                )
+                .unwrap();
+            CommitStore::new(&env.env_path())
+                .save(&CommitsData::new())
+                .unwrap();
+            std::fs::create_dir_all(env.blob_store_path().join(layer.to_string())).unwrap();
+            let mut index = ImageIndex::load(&env.images_path()).unwrap();
+            index.insert(ImageManifest {
+                digest,
+                registry: "docker.io".into(),
+                repository: "library/fake".into(),
+                tag: "1".into(),
+                layer_digests: vec![layer],
+                entrypoint: vec![],
+                cmd: vec![],
+                env: vec![],
+                working_dir: "/".into(),
+                pulled_at: chrono::Utc::now(),
+            });
+            index.save().unwrap();
+            env.uuid
+        };
+        store.save().unwrap();
+        (store, uuid)
+    }
+
     #[test]
     fn diff_reports_uncommitted_changes_against_baseline() {
         let dir = tempfile::tempdir().unwrap();
-        let (store, uuid) = setup(dir.path());
+        let (store, uuid) = setup_guest(dir.path());
         let env = store.find_by_id(&uuid).unwrap();
         let mut ws = Workspace::open(env).unwrap();
 
@@ -535,13 +580,15 @@ mod tests {
 
         let ws = Workspace::open(env).unwrap();
         let list = ws.diff(None, None).unwrap();
-        // Baseline includes the committed layer and the host "/", so the
-        // only reported change is the uncommitted file. "uncommitted"
-        // cannot exist at host / (we'd never run tests as root with such
-        // a file), so it is a Create... unless the host actually has
-        // /uncommitted; be lenient and just check the path appears once.
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].path(), Path::new("uncommitted"));
+        // The committed file is part of the baseline (lower layer), so
+        // only the uncommitted upper content is reported.
+        assert_eq!(
+            list,
+            vec![Change::Create {
+                path: "uncommitted".into(),
+                source: env.upper_path().join("uncommitted"),
+            }]
+        );
     }
 
     #[test]

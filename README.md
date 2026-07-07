@@ -2,30 +2,31 @@
 
 English | [日本語](README_ja.md)
 
-A container environment manager with Git-like version control, built in Rust.
-
-orca lets you spin up isolated Linux containers, make changes freely, and commit or discard them — just like version-controlling your environment.
+A Git-like sandboxed version control system
 
 ## Motivation
 
-Ever wanted to try `make install` without worrying about your system? Or debug a production issue by making destructive changes to your environment, knowing you can instantly roll back?
+* Try `make install` without worrying about polluting your system.
+* Debug with destructive file changes, knowing you can always roll back.
 
-orca solves this by combining **OverlayFS-based container isolation** with **Git-style version control** for your filesystem changes.
+orca achieves this with containers based on your current environment, plus version control over the whole container.
 
 ```bash
-# Create a container based on your host system
+# Create an environment (env)
 orca init myenv
 
-# Enter the container and do whatever you want
+# Enter a container based on your current environment and work freely
 orca run bash
-# $ make install    <- safe! changes are isolated
-# $ apt install ... <- go wild
-# $ exit
+# $ make install    <- changes are isolated & the host is untouched
+# $ exit            <- leaving the container brings you back to the original environment
 
-# Commit the changes, just like Git
+# Commit the changes like Git, if you want to keep them
 orca commit -m "install foo and its dependencies"
 
-# Or throw them away
+# Apply the container state to the host (the files from make install get placed on the host)
+orca apply
+
+# OR discard the changes
 orca clean
 ```
 
@@ -35,49 +36,27 @@ orca clean
 - **Git-style version control** — commit, branch, checkout, reset, rebase, and log your environment changes
 - **Docker image support** — pull and use any Docker image as a base
 - **Host rootfs support** — use your live system as a base for zero-setup containers
-- **Branching** — experiment in parallel, merge or discard branches freely
-
-## Requirements
-
-- Linux kernel with OverlayFS support
-- Root privileges (or `CAP_SYS_ADMIN`)
+- **Branching** — experiment in parallel, merge (rebase) or discard branches freely
 
 ## Installation
 
-```bash
-cargo install orca
-```
-
-## Quick Start
+1. Download orca
 
 ```bash
-# Create a container from your host system (default)
-orca init myenv
-
-# Or from a Docker image
-orca init myenv --image ubuntu:24.04
-
-# Enter the container
-orca run
-
-# Make changes, then commit
-orca commit -m "installed build dependencies"
-
-# View history
-orca log
-
-# Create a branch to try something risky
-orca branch experiment
-orca checkout experiment
-orca run bash
-orca commit -m "tried the risky thing"
-
-# Rebase back (or just discard the branch)
-orca checkout main
-orca rebase main experiment
+wget https://github.com/miyake13000/orca/releases/latest/download/orca
 ```
 
-## CLI Reference
+2. Give orca root privileges (sudo or setuid)
+    - setuid (recommended): `sudo chown root:root orca && sudo chmod 4755 orca`
+    - sudo: `echo "alias orca='sudo \$(which orca)'" >> ~/.bashrc && source ~/.bashrc`
+
+|                     | setuid              | sudo                      |
+| ------------------- | ------------------- | ------------------------- |
+| Environment variables | preserved         | reset (`sudo -E` to preserve) |
+| `orca run` user     | the invoking user   | root (`orca run --user $(id -u) --group $(id -g)` to keep) |
+| Data location       | `$HOME/.local/share/orca` | `/root/.local/share/orca` |
+
+## Command Reference
 
 ### Global Options
 
@@ -114,6 +93,8 @@ The target environment is resolved in this order:
 | `orca run <cmd> [args]` | Run a specific command inside the container |
 | `orca run --no-pid` / `--no-uts` / `--no-ipc` | Disable PID / UTS / IPC namespace isolation |
 | `orca run --network` | Isolate the network namespace (shared with host by default) |
+| `orca run --user <uid\|name>` | Run as this user inside the container |
+| `orca run --group <gid\|name>` | Run with this group inside the container |
 
 ### Version Control
 
@@ -133,7 +114,7 @@ The target environment is resolved in this order:
 | `orca merge <branch>` | Merge a branch (not yet implemented) |
 | `orca gc` | Remove unreachable commits and objects |
 
-> `ROOT` can be used as the target of `checkout` / `reset` — it resolves to the initial (parentless) commit.
+> `ROOT` (the initial commit) can be used as the target of `checkout` / `reset`
 
 ### Apply
 
@@ -156,13 +137,12 @@ The target environment is resolved in this order:
 
 ---
 
-
 ## Limitations
 
-- Linux only (OverlayFS is a Linux kernel feature)
-- Requires root or `CAP_SYS_ADMIN`
-- Maximum 500 committed layers per container (OverlayFS kernel limit)
-- Filesystems mounted separately on the host (e.g. a separate `/home` partition) are not visible inside host-based containers (OverlayFS lower layers do not cross mount points)
+- Linux only
+- Requires root privileges (sudo or setuid)
+- Maximum 500 committed layers per container (OverlayFS limit)
+- Filesystems mounted separately on the host (e.g. a separate `/home` partition) are not visible inside host-based containers
 - `orca merge` is not yet implemented; use `orca rebase <newbase> <target>` instead (rebase target onto newbase)
 - Concurrent access to the same container is not supported
 

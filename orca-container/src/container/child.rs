@@ -23,8 +23,8 @@ use orca_image::Image;
 use crate::image::{OverlayMount, SessionPaths};
 use crate::mount::{self, PseudoMount};
 
-use super::IoMode;
 use super::tty::send_fd;
+use super::{IoMode, RunAs};
 
 /// Everything the child needs, borrowed from the parent's (copied)
 /// address space.
@@ -35,6 +35,7 @@ pub(crate) struct ChildConfig<'a> {
     pub cmd: &'a [String],
     pub env: &'a [String],
     pub cwd: &'a Path,
+    pub run_as: Option<&'a RunAs>,
     pub hostname: Option<&'a str>,
     pub set_hostname: bool,
     /// Write end of the CLOEXEC status pipe.
@@ -131,12 +132,21 @@ pub(crate) fn child_main(cfg: &ChildConfig<'_>) -> isize {
         fail(status, "umount(/oldroot)", e.to_string());
     }
 
-    // 10. Working directory (fall back to /).
+    // 10. Complete privilege drop (required when requested; uid last so
+    //     the preceding group changes are still permitted).
+    if let Some(run_as) = cfg.run_as
+        && let Err(e) = drop_privileges(run_as)
+    {
+        fail(status, "drop_privileges", e);
+    }
+
+    // 11. Working directory (checked as the final identity; fall back
+    //     to /).
     if nix::unistd::chdir(cfg.cwd).is_err() {
         let _ = nix::unistd::chdir("/");
     }
 
-    // 11. exec. Reaching it closes the CLOEXEC status pipe -> parent EOF.
+    // 12. exec. Reaching it closes the CLOEXEC status pipe -> parent EOF.
     let argv: Vec<CString> = cfg
         .cmd
         .iter()
@@ -267,6 +277,24 @@ fn populate_dev() {
             warn(link, e);
         }
     }
+}
+
+/// Become `run_as` completely: supplementary groups, then gid, then uid,
+/// each including the saved id (`setresgid` / `setresuid` with all three
+/// equal). Dropping the saved id too means the process cannot regain root
+/// and — equally important — shells see euid == ruid and start normally
+/// instead of entering their setuid security mode (which suppresses rc
+/// files).
+fn drop_privileges(run_as: &RunAs) -> Result<(), String> {
+    use nix::unistd::{Gid, Uid, setgroups, setresgid, setresuid};
+
+    let groups: Vec<Gid> = run_as.groups.iter().map(|g| Gid::from_raw(*g)).collect();
+    setgroups(&groups).map_err(|e| format!("setgroups: {e}"))?;
+    let gid = Gid::from_raw(run_as.gid);
+    setresgid(gid, gid, gid).map_err(|e| format!("setresgid({gid}): {e}"))?;
+    let uid = Uid::from_raw(run_as.uid);
+    setresuid(uid, uid, uid).map_err(|e| format!("setresuid({uid}): {e}"))?;
+    Ok(())
 }
 
 /// Copy the host's resolv.conf (via /oldroot) so DNS works even when the
