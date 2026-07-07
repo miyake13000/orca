@@ -45,9 +45,67 @@ pub fn orca_root() -> PathBuf {
         .join("orca")
 }
 
+/// Optional per-environment configuration, used both for the global
+/// `[defaults]` table and the per-env `[envs.settings]` table in
+/// envs.toml.
+///
+/// The ImageConfig-shaped fields are `Option` (None = fall through to the
+/// next source in the priority chain "CLI args > env-specific > defaults >
+/// image declaration"); `blacklist` merges as a union instead. The
+/// blacklist patterns themselves are interpreted by
+/// `orca_image::Blacklist` (diff vocabulary) — this type only carries the
+/// strings.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EnvSettings {
+    /// Override for the image entrypoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<Vec<String>>,
+    /// Override for the image cmd (also the default command for
+    /// host-based environments).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmd: Option<Vec<String>>,
+    /// Extra / overriding environment variables (`KEY=VALUE`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<Vec<String>>,
+    /// Override for the working directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<PathBuf>,
+    /// Git-ignore-style patterns excluded from diff / apply (never from
+    /// commit).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blacklist: Vec<String>,
+}
+
+impl EnvSettings {
+    /// Merge `defaults` (the `[defaults]` table) with `specific` (the
+    /// env's own `[envs.settings]`): specific `Some` fields replace
+    /// wholesale, blacklists concatenate (union).
+    pub fn merged(defaults: &EnvSettings, specific: &EnvSettings) -> EnvSettings {
+        EnvSettings {
+            entrypoint: specific
+                .entrypoint
+                .clone()
+                .or_else(|| defaults.entrypoint.clone()),
+            cmd: specific.cmd.clone().or_else(|| defaults.cmd.clone()),
+            env: specific.env.clone().or_else(|| defaults.env.clone()),
+            working_dir: specific
+                .working_dir
+                .clone()
+                .or_else(|| defaults.working_dir.clone()),
+            blacklist: defaults
+                .blacklist
+                .iter()
+                .chain(specific.blacklist.iter())
+                .cloned()
+                .collect(),
+        }
+    }
+}
+
 /// One environment record plus its resolved filesystem locations.
 ///
-/// Serialized into `envs.toml` (the `root` field is derived, not stored).
+/// Serialized into `envs.toml` (the `root` and `effective_settings`
+/// fields are derived, not stored).
 /// Invariant: `name` is non-empty and unique within the store.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Env {
@@ -60,12 +118,24 @@ pub struct Env {
     pub base_ref: BaseImageRef,
     /// Creation time.
     pub created_at: DateTime<Utc>,
+    /// Per-env configuration (`[envs.settings]`), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<EnvSettings>,
     /// orca data root; injected after deserialization.
     #[serde(skip)]
     root: PathBuf,
+    /// `[defaults]` merged with `settings`; computed on load/create.
+    #[serde(skip)]
+    effective_settings: EnvSettings,
 }
 
 impl Env {
+    /// The effective configuration: `[defaults]` overlaid with this
+    /// env's `[envs.settings]` (blacklist = union of both).
+    pub fn settings(&self) -> &EnvSettings {
+        &self.effective_settings
+    }
+
     /// The environment directory (`envs/<uuid>/`).
     pub fn env_path(&self) -> PathBuf {
         self.root.join("envs").join(self.uuid.to_string())
@@ -146,6 +216,9 @@ impl Env {
 struct EnvsFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     current: Option<Uuid>,
+    /// Global `[defaults]` applied to every env (under its own settings).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    defaults: Option<EnvSettings>,
     #[serde(default)]
     envs: Vec<Env>,
 }
@@ -171,8 +244,11 @@ impl EnvStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => EnvsFile::default(),
             Err(e) => return Err(e.into()),
         };
+        let defaults = data.defaults.clone().unwrap_or_default();
         for env in &mut data.envs {
             env.root = root.clone();
+            env.effective_settings =
+                EnvSettings::merged(&defaults, env.settings.as_ref().unwrap_or(&Default::default()));
         }
         Ok(Self {
             root,
@@ -227,7 +303,9 @@ impl EnvStore {
             name,
             base_ref,
             created_at: Utc::now(),
+            settings: None,
             root: self.root.clone(),
+            effective_settings: self.data.defaults.clone().unwrap_or_default(),
         };
         std::fs::create_dir_all(env.upper_path())?;
         std::fs::create_dir_all(env.layers_path())?;
@@ -321,6 +399,61 @@ mod tests {
         assert!(s3.current().is_err());
         assert!(s3.resolve("myenv").is_err());
         s3.save().unwrap();
+    }
+
+    #[test]
+    fn settings_merge_and_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = store(dir.path());
+        s.create("cfg".into(), BaseImageRef::Host).unwrap();
+        s.save().unwrap();
+
+        // Add per-env [envs.settings] and global [defaults] the way a
+        // user would: by editing envs.toml. [envs.settings] attaches to
+        // the most recent [[envs]] element.
+        let file = dir.path().join("envs/envs.toml");
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        text.push_str("\n[envs.settings]\ncmd = [\"/bin/zsh\"]\nblacklist = [\"/var/log\"]\n");
+        text.push_str(
+            "\n[defaults]\ncmd = [\"/bin/bash\"]\nenv = [\"EDITOR=vim\"]\nblacklist = [\"*.history\"]\n",
+        );
+        std::fs::write(&file, &text).unwrap();
+
+        let s = store(dir.path());
+        let env = s.find_by_name("cfg").unwrap();
+        let settings = env.settings();
+        // Specific replaces wholesale...
+        assert_eq!(settings.cmd, Some(vec!["/bin/zsh".to_string()]));
+        // ...unset fields fall through to defaults...
+        assert_eq!(settings.env, Some(vec!["EDITOR=vim".to_string()]));
+        assert_eq!(settings.entrypoint, None);
+        // ...and blacklists union (defaults first).
+        assert_eq!(settings.blacklist, vec!["*.history", "/var/log"]);
+
+        // Saving keeps both tables intact.
+        s.save().unwrap();
+        let s = store(dir.path());
+        let env = s.find_by_name("cfg").unwrap();
+        assert_eq!(env.settings().blacklist, vec!["*.history", "/var/log"]);
+    }
+
+    #[test]
+    fn merged_prefers_specific_and_unions_blacklist() {
+        let defaults = EnvSettings {
+            cmd: Some(vec!["a".into()]),
+            working_dir: Some("/d".into()),
+            blacklist: vec!["x".into()],
+            ..Default::default()
+        };
+        let specific = EnvSettings {
+            cmd: Some(vec!["b".into()]),
+            blacklist: vec!["y".into()],
+            ..Default::default()
+        };
+        let merged = EnvSettings::merged(&defaults, &specific);
+        assert_eq!(merged.cmd, Some(vec!["b".to_string()]));
+        assert_eq!(merged.working_dir, Some("/d".into()));
+        assert_eq!(merged.blacklist, vec!["x", "y"]);
     }
 
     #[test]

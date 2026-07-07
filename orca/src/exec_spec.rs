@@ -19,6 +19,8 @@ use std::path::PathBuf;
 use orca_container::RunAs;
 use orca_image::ImageConfig;
 
+use crate::env::EnvSettings;
+
 /// Errors from execution-spec resolution.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecSpecError {
@@ -184,17 +186,26 @@ pub struct ExecSpec {
 impl ExecSpec {
     /// Resolve the execution spec. Pure — all context is passed in.
     ///
-    /// Rules (DESIGN §5):
-    /// - argv: `user_cmd` > (host) `target.shell` > `$SHELL` > `/bin/bash`
-    ///   / (guest) `entrypoint + cmd`.
-    /// - env: (host) inherit `inv.environ`, overriding `HOME` `USER`
-    ///   `LOGNAME` `SHELL` from `target` when dropping (this cancels
-    ///   sudo's env_reset so the sudo and setuid paths agree) / (guest)
-    ///   the image env. A missing `TERM` is supplemented in tty mode.
-    /// - cwd: (host) `inv.cwd` / (guest) `config.working_dir`.
+    /// `settings` is the merged envs.toml configuration (`[defaults]`
+    /// overlaid with `[envs.settings]`; the blacklist field is not used
+    /// here). The priority chain "CLI args > env-specific > defaults >
+    /// image declaration" is implemented in this one place (DESIGN §5):
+    ///
+    /// - argv: `user_cmd` > settings `entrypoint`/`cmd` (if either is
+    ///   set) > (host) `target.shell` > `$SHELL` > `/bin/bash` / (guest)
+    ///   image `entrypoint + cmd`.
+    /// - env: (host) inherit `inv.environ`, override `HOME` `USER`
+    ///   `LOGNAME` `SHELL` from `target` when dropping (cancels sudo's
+    ///   env_reset), then overlay settings `env` per key (explicit
+    ///   configuration beats the derived identity) / (guest) settings
+    ///   `env` or the image env. A missing `TERM` is supplemented in tty
+    ///   mode.
+    /// - cwd: settings `working_dir` > (host) `inv.cwd` / (guest)
+    ///   `config.working_dir`.
     pub fn resolve(
         is_host: bool,
         config: &ImageConfig,
+        settings: &EnvSettings,
         inv: &Invocation,
         target: Option<&UserIdentity>,
         user_cmd: Option<Vec<String>>,
@@ -204,13 +215,20 @@ impl ExecSpec {
         let mut env: Vec<String> = if is_host {
             inv.environ.clone()
         } else {
-            config.env.clone()
+            settings.env.clone().unwrap_or_else(|| config.env.clone())
         };
         if is_host && let Some(user) = target {
             set_env(&mut env, "HOME", &user.home.to_string_lossy());
             set_env(&mut env, "USER", &user.name);
             set_env(&mut env, "LOGNAME", &user.name);
             set_env(&mut env, "SHELL", &user.shell.to_string_lossy());
+        }
+        if is_host && let Some(extra) = &settings.env {
+            for entry in extra {
+                if let Some((key, value)) = entry.split_once('=') {
+                    set_env(&mut env, key, value);
+                }
+            }
         }
         if tty && get_env(&env, "TERM").is_none() {
             let term = get_env(&inv.environ, "TERM").unwrap_or("xterm");
@@ -219,30 +237,40 @@ impl ExecSpec {
         }
 
         // --- argv ---
+        let settings_argv = (settings.entrypoint.is_some() || settings.cmd.is_some()).then(|| {
+            let mut argv = settings
+                .entrypoint
+                .clone()
+                .unwrap_or_else(|| config.entrypoint.clone());
+            argv.extend(settings.cmd.clone().unwrap_or_else(|| config.cmd.clone()));
+            argv
+        });
         let argv = match user_cmd {
             Some(cmd) if !cmd.is_empty() => cmd,
-            _ if is_host => {
-                let shell = target
-                    .map(|u| u.shell.to_string_lossy().into_owned())
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| get_env(&inv.environ, "SHELL").map(str::to_string))
-                    .unwrap_or_else(|| "/bin/bash".to_string());
-                vec![shell]
-            }
-            _ => {
-                let mut argv = config.entrypoint.clone();
-                argv.extend(config.cmd.clone());
-                argv
-            }
+            _ => match settings_argv {
+                Some(argv) if !argv.is_empty() => argv,
+                _ if is_host => {
+                    let shell = target
+                        .map(|u| u.shell.to_string_lossy().into_owned())
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| get_env(&inv.environ, "SHELL").map(str::to_string))
+                        .unwrap_or_else(|| "/bin/bash".to_string());
+                    vec![shell]
+                }
+                _ => {
+                    let mut argv = config.entrypoint.clone();
+                    argv.extend(config.cmd.clone());
+                    argv
+                }
+            },
         };
 
         // --- cwd ---
-        let cwd = if is_host {
-            inv.cwd.clone()
-        } else if config.working_dir.as_os_str().is_empty() {
-            PathBuf::from("/")
-        } else {
-            config.working_dir.clone()
+        let cwd = match &settings.working_dir {
+            Some(wd) => wd.clone(),
+            None if is_host => inv.cwd.clone(),
+            None if config.working_dir.as_os_str().is_empty() => PathBuf::from("/"),
+            None => config.working_dir.clone(),
         };
 
         ExecSpec {
@@ -313,7 +341,7 @@ mod tests {
         let spec = ExecSpec::resolve(
             true,
             &ImageConfig::default(),
-            &inv,
+            &EnvSettings::default(), &inv,
             Some(&user),
             None,
             true,
@@ -338,7 +366,7 @@ mod tests {
     fn host_without_target_stays_root_and_inherits_everything() {
         let inv = sudo_invocation();
         let spec =
-            ExecSpec::resolve(true, &ImageConfig::default(), &inv, None, None, false);
+            ExecSpec::resolve(true, &ImageConfig::default(), &EnvSettings::default(), &inv, None, None, false);
         assert!(spec.run_as.is_none());
         assert!(spec.env.contains(&"HOME=/root".to_string()));
         // Root's $SHELL (from the fabricated environ) is the default cmd.
@@ -352,7 +380,7 @@ mod tests {
         let spec = ExecSpec::resolve(
             true,
             &ImageConfig::default(),
-            &inv,
+            &EnvSettings::default(), &inv,
             Some(&user),
             Some(vec!["make".into(), "install".into()]),
             false,
@@ -370,7 +398,7 @@ mod tests {
             working_dir: "/app".into(),
         };
         let user = identity();
-        let spec = ExecSpec::resolve(false, &config, &inv, Some(&user), None, true);
+        let spec = ExecSpec::resolve(false, &config, &EnvSettings::default(), &inv, Some(&user), None, true);
         assert_eq!(spec.argv, vec!["/entry", "serve"]);
         // Image env, not the host environ; no identity override for guest
         // (the container's /etc/passwd is not the host's).
@@ -388,8 +416,112 @@ mod tests {
         let mut inv = sudo_invocation();
         inv.environ.retain(|e| !e.starts_with("TERM="));
         let config = ImageConfig::default();
-        let spec = ExecSpec::resolve(false, &config, &inv, None, None, true);
+        let spec = ExecSpec::resolve(false, &config, &EnvSettings::default(), &inv, None, None, true);
         assert!(spec.env.contains(&"TERM=xterm".to_string()));
+    }
+
+    #[test]
+    fn settings_cmd_overrides_host_shell_but_args_win() {
+        let inv = sudo_invocation();
+        let user = identity();
+        let settings = EnvSettings {
+            cmd: Some(vec!["/bin/fish".into()]),
+            ..Default::default()
+        };
+        let spec = ExecSpec::resolve(
+            true,
+            &ImageConfig::default(),
+            &settings,
+            &inv,
+            Some(&user),
+            None,
+            false,
+        );
+        // env-specific cmd beats the login shell...
+        assert_eq!(spec.argv, vec!["/bin/fish"]);
+        // ...but CLI args beat the settings.
+        let spec = ExecSpec::resolve(
+            true,
+            &ImageConfig::default(),
+            &settings,
+            &inv,
+            Some(&user),
+            Some(vec!["ls".into()]),
+            false,
+        );
+        assert_eq!(spec.argv, vec!["ls"]);
+    }
+
+    #[test]
+    fn settings_env_overlays_identity_and_inherited() {
+        let inv = sudo_invocation();
+        let user = identity();
+        let settings = EnvSettings {
+            env: Some(vec!["EDITOR=vim".into(), "HOME=/custom".into()]),
+            ..Default::default()
+        };
+        let spec = ExecSpec::resolve(
+            true,
+            &ImageConfig::default(),
+            &settings,
+            &inv,
+            Some(&user),
+            None,
+            false,
+        );
+        assert!(spec.env.contains(&"EDITOR=vim".to_string()));
+        // Explicit settings beat the passwd-derived identity var.
+        assert!(spec.env.contains(&"HOME=/custom".to_string()));
+        assert!(!spec.env.contains(&"HOME=/home/testuser".to_string()));
+        // Untouched inherited vars survive.
+        assert!(spec.env.contains(&"PATH=/fake/bin".to_string()));
+    }
+
+    #[test]
+    fn settings_working_dir_wins_over_invocation_cwd_and_image() {
+        let inv = sudo_invocation();
+        let settings = EnvSettings {
+            working_dir: Some("/w".into()),
+            ..Default::default()
+        };
+        let spec = ExecSpec::resolve(
+            true,
+            &ImageConfig::default(),
+            &settings,
+            &inv,
+            None,
+            None,
+            false,
+        );
+        assert_eq!(spec.cwd, PathBuf::from("/w"));
+        let config = ImageConfig {
+            working_dir: "/app".into(),
+            ..Default::default()
+        };
+        let spec = ExecSpec::resolve(false, &config, &settings, &inv, None, None, false);
+        assert_eq!(spec.cwd, PathBuf::from("/w"));
+    }
+
+    #[test]
+    fn settings_replace_guest_declaration_wholesale() {
+        let inv = sudo_invocation();
+        let config = ImageConfig {
+            entrypoint: vec!["/entry".into()],
+            cmd: vec!["serve".into()],
+            env: vec!["PATH=/bin".into()],
+            working_dir: "/app".into(),
+        };
+        let settings = EnvSettings {
+            cmd: Some(vec!["debug".into()]),
+            env: Some(vec!["PATH=/custom".into()]),
+            ..Default::default()
+        };
+        let spec = ExecSpec::resolve(false, &config, &settings, &inv, None, None, false);
+        // entrypoint falls through to the image; cmd is replaced.
+        assert_eq!(spec.argv, vec!["/entry", "debug"]);
+        // Guest env is replaced wholesale (no per-key merge).
+        assert_eq!(spec.env, vec!["PATH=/custom"]);
+        assert_eq!(spec.cwd, PathBuf::from("/app"));
     }
 
     #[test]

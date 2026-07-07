@@ -52,6 +52,7 @@ pub fn run(env: &Env, opts: RunOpts) -> anyhow::Result<i32> {
     let spec = ExecSpec::resolve(
         matches!(env.base_ref, BaseImageRef::Host),
         &image.config,
+        env.settings(),
         &invocation,
         target.as_ref(),
         user_cmd,

@@ -17,7 +17,7 @@ use orca_image::external_image::{
     BlobStoreError, ImageIndex, IndexError, LayerBlobStore,
 };
 use orca_image::{
-    Base, BaseImageRef, Change, DiffError, Image, ImageConfig, Layer, LayerStore,
+    Base, BaseImageRef, Blacklist, Change, DiffError, Image, ImageConfig, Layer, LayerStore,
     LayerStoreError, Upper, changes,
 };
 use orca_vcs::{Commit, CommitBuilder, CommitStore, CommitsData, Head, Vcs, VcsError};
@@ -79,20 +79,31 @@ pub struct Workspace<'a> {
     commit_store: CommitStore,
     layer_store: LayerStore,
     commits: CommitsData,
+    /// Parsed from the env's effective settings; applied to diff / apply
+    /// (never to commit — DESIGN §6).
+    blacklist: Blacklist,
 }
 
 impl<'a> Workspace<'a> {
-    /// Open the workspace: construct the stores and load `commits.toml`.
+    /// Open the workspace: construct the stores, load `commits.toml`,
+    /// and parse the env's diff blacklist.
     pub fn open(env: &'a Env) -> Result<Self, WorkspaceError> {
         let commit_store = CommitStore::new(&env.env_path());
         let layer_store = LayerStore::new(&env.layers_path());
         let commits = commit_store.load()?;
+        let blacklist = Blacklist::parse(&env.settings().blacklist);
         Ok(Self {
             env,
             commit_store,
             layer_store,
             commits,
+            blacklist,
         })
+    }
+
+    /// The blacklist to hand to `changes()` (None when unconfigured).
+    fn blacklist(&self) -> Option<&Blacklist> {
+        (!self.blacklist.is_empty()).then_some(&self.blacklist)
     }
 
     /// Read-only access to the commit graph (for `log` / `branch -a`
@@ -327,16 +338,16 @@ impl<'a> Workspace<'a> {
         match (a, b) {
             (None, _) => {
                 let new = vec![Layer::new(self.env.upper_path())];
-                Ok(changes(&new, &image.baseline())?)
+                Ok(changes(&new, &image.baseline(), self.blacklist())?)
             }
             (Some(a), None) => {
                 let new = self.stack_of(self.resolve_target_commit(a)?)?;
-                Ok(changes(&new, &image.base_only())?)
+                Ok(changes(&new, &image.base_only(), self.blacklist())?)
             }
             (Some(a), Some(b)) => {
                 let new = self.stack_of(self.resolve_target_commit(a)?)?;
                 let base = self.stack_of(self.resolve_target_commit(b)?)?;
-                Ok(changes(&new, &base)?)
+                Ok(changes(&new, &base, self.blacklist())?)
             }
         }
     }
@@ -382,7 +393,7 @@ impl<'a> Workspace<'a> {
         }
         new.extend(self.stack_of(head)?);
         let base = vec![Layer::new(std::path::PathBuf::from("/"))];
-        let list = changes(&new, &base)?;
+        let list = changes(&new, &base, self.blacklist())?;
         if dry_run || !force {
             return Ok(list);
         }
@@ -589,6 +600,27 @@ mod tests {
                 source: env.upper_path().join("uncommitted"),
             }]
         );
+    }
+
+    #[test]
+    fn diff_respects_blacklist_from_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, uuid) = setup_guest(dir.path());
+        // Configure a [defaults] blacklist the way a user would: by
+        // editing envs.toml, then reloading the store.
+        let file = dir.path().join("envs/envs.toml");
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        text.push_str("\n[defaults]\nblacklist = [\"*.secret\"]\n");
+        std::fs::write(&file, &text).unwrap();
+        let store = EnvStore::load(&dir.path().join("envs")).unwrap();
+        let env = store.find_by_id(&uuid).unwrap();
+
+        write_upper(env, "keep.txt", b"1");
+        write_upper(env, "x.secret", b"2");
+        let ws = Workspace::open(env).unwrap();
+        let list = ws.diff(None, None).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].path(), Path::new("keep.txt"));
     }
 
     #[test]

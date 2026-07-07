@@ -137,6 +137,40 @@ The target environment is resolved in this order:
 
 ---
 
+## Configuration (envs.toml)
+
+Editing `envs/envs.toml` in the data location lets you configure all environments (`[defaults]`) and individual ones (`[envs.settings]`). The priority is **CLI arguments > env-specific > defaults > image declaration** (only `blacklist` merges as the union of defaults and env-specific).
+
+```toml
+[defaults]                  # applies to every env
+env = ["EDITOR=vim"]
+blacklist = ["*_history", ".cache"]
+
+[[envs]]
+# ...fields managed by orca...
+
+[envs.settings]             # this env only (every field optional)
+cmd = ["/bin/zsh"]
+working_dir = "/root"
+blacklist = ["/var/log"]
+```
+
+| Field | Description |
+|---|---|
+| `entrypoint` / `cmd` | Override the startup command |
+| `env` | Add / override environment variables (`KEY=VALUE`) |
+| `working_dir` | Override the working directory |
+| `blacklist` | Paths excluded from diff / apply (see below) |
+
+Blacklist entries are gitignore-style patterns:
+
+- `/xxx/yyy` — path anchored at the root (any pattern containing a slash is anchored)
+- `xxx` — file/directory name match at any depth
+- Wildcards `*` (never crosses a path separator) and `?`
+- Matching a directory excludes its whole subtree
+
+The blacklist only affects what `orca diff` shows and what `orca apply` applies. Commits are unaffected: layers always record every file.
+
 ## Limitations
 
 - Linux only

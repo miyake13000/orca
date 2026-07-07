@@ -27,7 +27,7 @@ mod layer;
 mod store;
 pub(crate) mod whiteout;
 
-pub use diff::{Change, DiffError, changes};
+pub use diff::{Blacklist, Change, DiffError, changes};
 pub use image::{Base, Image, ImageConfig};
 pub use layer::{Layer, Upper};
 pub use store::{LayerStore, LayerStoreError};

@@ -24,7 +24,7 @@ mod exec_spec;
 mod lock;
 mod workspace;
 
-pub use env::{Env, EnvError, EnvStore, orca_root};
+pub use env::{Env, EnvError, EnvSettings, EnvStore, orca_root};
 pub use exec_spec::{ExecSpec, ExecSpecError, Invocation, UserIdentity, resolve_run_target};
 pub use lock::{LockError, LockFile};
 pub use workspace::{Workspace, WorkspaceError, is_setuid_source};

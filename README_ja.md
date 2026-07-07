@@ -139,6 +139,39 @@ orca [--env <name-or-uuid>] <command> [args]
 
 ---
 
+blacklist が効くのは `orca diff` の表示と `orca apply` の適用対象のみ．commit には影響せず，レイヤには全ファイルが記録される．
+## 設定 (envs.toml)
+
+データ保存場所の `envs/envs.toml` を編集すると，全 env 共通 (`[defaults]`) と env 個別 (`[envs.settings]`) の設定を書ける．優先度は **コマンドライン引数 > env 個別 > 共通 > イメージの宣言** (blacklist のみ共通と個別の和集合)．
+
+```toml
+[defaults]                  # 全 env 共通
+env = ["EDITOR=vim"]
+blacklist = ["*_history", ".cache"]
+
+[[envs]]
+# ...orca が管理するフィールド...
+
+[envs.settings]             # この env だけの設定 (全フィールド任意)
+cmd = ["/bin/zsh"]
+working_dir = "/root"
+blacklist = ["/var/log"]
+```
+
+| フィールド | 説明 |
+|---|---|
+| `entrypoint` / `cmd` | 起動コマンドの上書き |
+| `env` | 環境変数の追加/上書き (`KEY=VALUE`) |
+| `working_dir` | 作業ディレクトリの上書き |
+| `blacklist` | diff / apply から除外するパス (下記) |
+
+blacklist は Git ignore 風のパターンで指定する:
+
+- `/xxx/yyy` — ルート起点のパス指定 (スラッシュを含むパターンはアンカー扱い)
+- `xxx` — ファイル/ディレクトリ名一致 (任意の深さ)
+- ワイルドカード `*` (パス区切りは跨がない)・`?`
+- ディレクトリにマッチすると配下も丸ごと除外
+
 ## 制限事項
 
 - Linux 専用

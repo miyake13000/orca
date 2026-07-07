@@ -89,6 +89,112 @@ impl Change {
     }
 }
 
+/// Git-ignore-style exclusion patterns for diff computation.
+///
+/// This is diff vocabulary (like [`Change`]): the type owns parsing and
+/// matching only — where the patterns come from (envs.toml `[defaults]` /
+/// `[envs.settings]`) is the `orca` crate's concern and never leaks here.
+///
+/// Pattern forms (a subset of gitignore):
+/// - `/xxx/yyy` — anchored at the filesystem root; any pattern containing
+///   a `/` is treated as anchored, like Git.
+/// - `xxx` — no slash: matches a file/directory *name* at any depth.
+/// - Wildcards `*` (never crosses a path separator) and `?`.
+///
+/// A match on a directory hides its entire subtree. Parsing cannot fail;
+/// empty patterns are skipped.
+#[derive(Debug, Clone, Default)]
+pub struct Blacklist {
+    patterns: Vec<Pattern>,
+}
+
+#[derive(Debug, Clone)]
+enum Pattern {
+    /// Root-anchored: one glob per path segment.
+    Anchored(Vec<String>),
+    /// Name match: a glob applied to every path component.
+    Name(String),
+}
+
+impl Blacklist {
+    /// Parse patterns (gitignore-like subset; see the type docs).
+    pub fn parse(patterns: &[String]) -> Self {
+        let patterns = patterns
+            .iter()
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .map(|p| {
+                if p.contains('/') {
+                    Pattern::Anchored(
+                        p.trim_matches('/')
+                            .split('/')
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .collect(),
+                    )
+                } else {
+                    Pattern::Name(p.to_string())
+                }
+            })
+            .collect();
+        Self { patterns }
+    }
+
+    /// Whether no patterns are configured.
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+
+    /// Whether `rel` (relative to the filesystem root) or any of its
+    /// ancestors matches a pattern — i.e. the path is hidden from diff.
+    pub fn hides(&self, rel: &Path) -> bool {
+        let components: Vec<&str> = rel
+            .components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .collect();
+        self.patterns.iter().any(|pattern| match pattern {
+            Pattern::Name(glob) => components.iter().any(|c| glob_match(glob, c)),
+            Pattern::Anchored(segments) => {
+                // Matching a prefix of the components = the pattern names
+                // this path or one of its ancestors.
+                segments.len() <= components.len()
+                    && segments
+                        .iter()
+                        .zip(&components)
+                        .all(|(glob, c)| glob_match(glob, c))
+            }
+        })
+    }
+}
+
+/// Match a single path segment against a glob supporting `*` and `?`
+/// (`*` cannot cross segments because it is only ever applied to one).
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let mut backtrack: Option<(usize, usize)> = None;
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            backtrack = Some((pi, ti));
+            pi += 1;
+        } else if let Some((star_pi, star_ti)) = backtrack {
+            pi = star_pi + 1;
+            ti = star_ti + 1;
+            backtrack = Some((star_pi, star_ti + 1));
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
 /// A node in the merged view of the `new` stack.
 #[derive(Debug)]
 enum Node {
@@ -110,8 +216,17 @@ enum Node {
 /// metadata-only changes to existing directories are therefore not
 /// captured. Results are ordered lexicographically, except that the
 /// `Delete`s expanded from an opaque directory are emitted deepest-first.
-pub fn changes(new: &[Layer], base: &[Layer]) -> Result<Vec<Change>, DiffError> {
-    let merged = merge_new(new)?;
+///
+/// Paths hidden by `blacklist` (including everything below a matching
+/// directory) are pruned during the walk and never appear in the result —
+/// this covers both content changes and the deletes expanded from opaque
+/// directories.
+pub fn changes(
+    new: &[Layer],
+    base: &[Layer],
+    blacklist: Option<&Blacklist>,
+) -> Result<Vec<Change>, DiffError> {
+    let merged = merge_new(new, blacklist)?;
     let mut out = Vec::new();
     for (rel, node) in &merged {
         match node {
@@ -141,6 +256,7 @@ pub fn changes(new: &[Layer], base: &[Layer]) -> Result<Vec<Change>, DiffError> 
                         let mut deletes: Vec<PathBuf> = list_base_under(base, rel)?
                             .into_iter()
                             .filter(|p| !matches!(merged.get(p), Some(Node::Entry { .. })))
+                            .filter(|p| !blacklist.is_some_and(|b| b.hides(p)))
                             .collect();
                         deletes.sort();
                         deletes.reverse();
@@ -165,8 +281,12 @@ pub fn changes(new: &[Layer], base: &[Layer]) -> Result<Vec<Change>, DiffError> 
 
 /// Build the merged view of the `new` stack: for every visible relative
 /// path, the winning node (higher layers win; whiteouts, opaque dirs and
-/// non-directories shadow lower layers).
-fn merge_new(new: &[Layer]) -> Result<BTreeMap<PathBuf, Node>, DiffError> {
+/// non-directories shadow lower layers). Blacklisted paths are pruned
+/// here so they can never surface as changes.
+fn merge_new(
+    new: &[Layer],
+    blacklist: Option<&Blacklist>,
+) -> Result<BTreeMap<PathBuf, Node>, DiffError> {
     let mut merged: BTreeMap<PathBuf, Node> = BTreeMap::new();
     for (idx, layer) in new.iter().enumerate() {
         let walker = walkdir::WalkDir::new(layer.path())
@@ -180,6 +300,9 @@ fn merge_new(new: &[Layer]) -> Result<BTreeMap<PathBuf, Node>, DiffError> {
                 .strip_prefix(layer.path())
                 .expect("walkdir yields children of the layer root")
                 .to_path_buf();
+            if blacklist.is_some_and(|b| b.hides(&rel)) {
+                continue;
+            }
             if merged.contains_key(&rel) || shadowed_by_ancestor(&merged, &rel, idx) {
                 continue;
             }
@@ -367,7 +490,7 @@ mod tests {
         touch(new.path(), "etc/existing.conf");
         touch(base.path(), "etc/existing.conf");
 
-        let got = changes(&[layer(new.path())], &[layer(base.path())]).unwrap();
+        let got = changes(&[layer(new.path())], &[layer(base.path())], None).unwrap();
         assert_eq!(
             got,
             vec![
@@ -390,7 +513,7 @@ mod tests {
         touch(new.path(), "opt/app/bin");
         std::fs::create_dir_all(base.path().join("opt")).unwrap();
 
-        let got = changes(&[layer(new.path())], &[layer(base.path())]).unwrap();
+        let got = changes(&[layer(new.path())], &[layer(base.path())], None).unwrap();
         // "opt" exists in base -> merged silently; "opt/app" and below are new.
         assert_eq!(
             got,
@@ -416,7 +539,7 @@ mod tests {
         touch(bottom.path(), "etc/conf");
         touch(bottom.path(), "etc/other");
 
-        let got = changes(&[layer(top.path()), layer(bottom.path())], &[layer(base.path())])
+        let got = changes(&[layer(top.path()), layer(bottom.path())], &[layer(base.path())], None)
             .unwrap();
         assert_eq!(
             got,
@@ -444,7 +567,7 @@ mod tests {
         touch(top.path(), "data"); // file
         touch(bottom.path(), "data/inner"); // dir with file below
 
-        let got = changes(&[layer(top.path()), layer(bottom.path())], &[]).unwrap();
+        let got = changes(&[layer(top.path()), layer(bottom.path())], &[], None).unwrap();
         assert_eq!(
             got,
             vec![Change::Create {
@@ -459,7 +582,7 @@ mod tests {
         let new = tempfile::tempdir().unwrap();
         let base = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink("/target", new.path().join("link")).unwrap();
-        let got = changes(&[layer(new.path())], &[layer(base.path())]).unwrap();
+        let got = changes(&[layer(new.path())], &[layer(base.path())], None).unwrap();
         assert_eq!(
             got,
             vec![Change::Create {
@@ -467,6 +590,71 @@ mod tests {
                 source: new.path().join("link"),
             }]
         );
+    }
+
+    fn blacklist(patterns: &[&str]) -> Blacklist {
+        Blacklist::parse(&patterns.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn blacklist_pattern_matching() {
+        // Name pattern: any depth, files and directories.
+        let b = blacklist(&["node_modules"]);
+        assert!(b.hides(Path::new("node_modules")));
+        assert!(b.hides(Path::new("a/b/node_modules")));
+        assert!(b.hides(Path::new("a/node_modules/deep/file"))); // subtree
+        assert!(!b.hides(Path::new("a/node_modules2")));
+
+        // Anchored pattern: root-relative, subtree included.
+        let b = blacklist(&["/var/log"]);
+        assert!(b.hides(Path::new("var/log")));
+        assert!(b.hides(Path::new("var/log/syslog")));
+        assert!(!b.hides(Path::new("opt/var/log")));
+        assert!(!b.hides(Path::new("var/logs")));
+
+        // A pattern containing a slash is anchored even without the
+        // leading one (Git behaviour).
+        let b = blacklist(&["etc/motd"]);
+        assert!(b.hides(Path::new("etc/motd")));
+        assert!(!b.hides(Path::new("x/etc/motd")));
+
+        // Wildcards, single segment only.
+        let b = blacklist(&["*.history", "?og"]);
+        assert!(b.hides(Path::new("root/cmd.history")));
+        assert!(b.hides(Path::new("home/u/app.history")));
+        assert!(b.hides(Path::new("log"))); // "?og"
+        assert!(!b.hides(Path::new("history")));
+        // Glob semantics match Git: ".bash_history" has an underscore,
+        // so "*.history" does NOT hide it ("*_history" would).
+        assert!(!b.hides(Path::new("root/.bash_history")));
+        assert!(blacklist(&["*_history"]).hides(Path::new("root/.bash_history")));
+        let b = blacklist(&["/home/*/.cache"]);
+        assert!(b.hides(Path::new("home/alice/.cache/x")));
+        assert!(!b.hides(Path::new("home/alice/deep/.cache")));
+
+        // Empty patterns are skipped.
+        let b = blacklist(&["", "  "]);
+        assert!(b.is_empty());
+        assert!(!b.hides(Path::new("anything")));
+    }
+
+    #[test]
+    fn blacklist_prunes_changes() {
+        let new = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        touch(new.path(), "root/cmd.history");
+        touch(new.path(), "var/cache/apt/pkg");
+        touch(new.path(), "etc/keep.conf");
+
+        let b = blacklist(&["*.history", "/var/cache"]);
+        let got = changes(&[layer(new.path())], &[layer(base.path())], Some(&b)).unwrap();
+        let paths: Vec<_> = got.iter().map(|c| c.path().to_path_buf()).collect();
+        // Hidden: the history file and everything under /var/cache.
+        assert!(paths.contains(&PathBuf::from("etc/keep.conf")));
+        assert!(paths.contains(&PathBuf::from("root")));
+        assert!(paths.contains(&PathBuf::from("var"))); // dir itself not matched
+        assert!(!paths.iter().any(|p| p.starts_with("var/cache")));
+        assert!(!paths.contains(&PathBuf::from("root/cmd.history")));
     }
 
     /// Whiteout / opaque tests need mknod + trusted xattrs -> root only.
@@ -491,7 +679,7 @@ mod tests {
         touch(new.path(), "opt/app/keep");
         whiteout::set_opaque(&new.path().join("opt/app")).unwrap();
 
-        let got = changes(&[layer(new.path())], &[layer(base.path())]).unwrap();
+        let got = changes(&[layer(new.path())], &[layer(base.path())], None).unwrap();
         assert!(got.contains(&Change::Delete { path: "etc/remove.me".into() }));
         assert!(!got.iter().any(|c| c.path() == Path::new("etc/ghost")));
         assert!(got.contains(&Change::Delete { path: "opt/app/drop/deep".into() }));
