@@ -25,6 +25,7 @@ use orca_vcs::{Commit, CommitBuilder, CommitStore, CommitsData, Head, Vcs, VcsEr
 use crate::apply::{self, ApplyError};
 use crate::env::Env;
 use crate::lock::{LockError, LockFile};
+use crate::COMMIT_FILE_NAME;
 
 /// Errors from workspace operations.
 #[derive(Debug, thiserror::Error)]
@@ -88,7 +89,8 @@ impl<'a> Workspace<'a> {
     /// Open the workspace: construct the stores, load `commits.toml`,
     /// and parse the env's diff blacklist.
     pub fn open(env: &'a Env) -> Result<Self, WorkspaceError> {
-        let commit_store = CommitStore::new(&env.env_path());
+        let commits_file = env.env_path().join(COMMIT_FILE_NAME);
+        let commit_store = CommitStore::new(&commits_file);
         let layer_store = LayerStore::new(&env.layers_path());
         let commits = commit_store.load()?;
         let blacklist = Blacklist::parse(&env.settings().blacklist);
@@ -440,7 +442,8 @@ mod tests {
         let mut store = EnvStore::load(&dir.join("envs")).unwrap();
         let uuid = {
             let env = store.create("t".into(), BaseImageRef::Host).unwrap();
-            CommitStore::new(&env.env_path())
+            let commits_file = env.env_path().join(COMMIT_FILE_NAME);
+            CommitStore::new(&commits_file)
                 .save(&CommitsData::new())
                 .unwrap();
             env.uuid
@@ -553,7 +556,8 @@ mod tests {
                     },
                 )
                 .unwrap();
-            CommitStore::new(&env.env_path())
+            let commits_file = env.env_path().join(COMMIT_FILE_NAME);
+            CommitStore::new(&commits_file)
                 .save(&CommitsData::new())
                 .unwrap();
             std::fs::create_dir_all(env.blob_store_path().join(layer.to_string())).unwrap();
@@ -635,7 +639,8 @@ mod tests {
                 },
             )
             .unwrap();
-        CommitStore::new(&guest.env_path())
+        let commits_file = guest.env_path().join(COMMIT_FILE_NAME);
+        CommitStore::new(&commits_file)
             .save(&CommitsData::new())
             .unwrap();
         let ws = Workspace::open(guest).unwrap();

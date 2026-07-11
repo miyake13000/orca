@@ -1,7 +1,7 @@
 //! `orca init / use / ls / rm / clean`.
 
 use anyhow::Context;
-use orca::{EnvStore, LockFile, Workspace};
+use orca::{EnvStore, LockFile, Workspace, COMMIT_FILE_NAME};
 use orca_image::BaseImageRef;
 use orca_image::external_image::{Downloader, ImageIndex, LayerBlobStore};
 use orca_vcs::{CommitStore, CommitsData};
@@ -43,7 +43,8 @@ pub fn init(
 
     let (uuid, env_path) = {
         let env = store.create(name.clone(), base_ref)?;
-        CommitStore::new(&env.env_path()).save(&CommitsData::new())?;
+        let commits_file = env.env_path().join(COMMIT_FILE_NAME);
+        CommitStore::new(&commits_file).save(&CommitsData::new())?;
         (env.uuid, env.env_path())
     };
     if !keep {

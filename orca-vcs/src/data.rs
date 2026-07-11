@@ -13,7 +13,7 @@ use crate::builder::CommitBuilder;
 
 /// Where HEAD points: a branch (normal) or a raw commit (detached).
 ///
-/// Serialized in commits.toml as a single string: `"branch:<name>"` or
+/// Serialized in the commits file as a single string: `"branch:<name>"` or
 /// `"commit:<hex>"`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Head {

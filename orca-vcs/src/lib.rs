@@ -1,7 +1,7 @@
 //! Git-like version control for orca environments.
 //!
-//! The commit graph is a DAG stored in `envs/<uuid>/commits.toml`
-//! ([`CommitStore`]). [`CommitsData`] holds the graph (commits, branches,
+//! The commit graph is a DAG stored in a TOML file at a caller-supplied
+//! path ([`CommitStore`]). [`CommitsData`] holds the graph (commits, branches,
 //! HEAD), [`CommitBuilder`] computes the immutable commit hash, and [`Vcs`]
 //! implements the operations (commit / checkout / reset / branch / rebase /
 //! gc).
@@ -54,13 +54,13 @@ pub enum VcsError {
     /// `orca merge` is reserved but not implemented.
     #[error("merge is not implemented yet; use rebase instead")]
     MergeUnimplemented,
-    /// commits.toml could not be read or written.
+    /// The commits file could not be read or written.
     #[error("failed to access commit store: {0}")]
     Io(#[from] std::io::Error),
-    /// commits.toml could not be parsed.
-    #[error("failed to parse commits.toml: {0}")]
+    /// The commits file could not be parsed.
+    #[error("failed to parse commits file: {0}")]
     Parse(#[from] toml::de::Error),
-    /// commits.toml could not be serialized.
-    #[error("failed to serialize commits.toml: {0}")]
+    /// The commits file could not be serialized.
+    #[error("failed to serialize commits file: {0}")]
     Serialize(#[from] toml::ser::Error),
 }

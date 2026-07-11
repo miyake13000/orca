@@ -1,24 +1,24 @@
-//! [`CommitStore`]: load/save of `commits.toml`.
+//! [`CommitStore`]: load/save of the commits file.
 
 use std::path::{Path, PathBuf};
 
 use crate::{CommitsData, VcsError};
 
-/// Persistence for [`CommitsData`], backed by `envs/<uuid>/commits.toml`.
+/// Persistence for [`CommitsData`], backed by a TOML file at a
+/// caller-supplied path.
 pub struct CommitStore {
     path: PathBuf,
 }
 
 impl CommitStore {
-    /// Create a store rooted at the environment directory
-    /// (`envs/<uuid>/`); the file managed is `<base_path>/commits.toml`.
-    pub fn new(base_path: &Path) -> Self {
+    /// Create a store managing the commits file at `file_path`.
+    pub fn new(file_path: &Path) -> Self {
         Self {
-            path: base_path.join("commits.toml"),
+            path: file_path.to_path_buf(),
         }
     }
 
-    /// Load and parse `commits.toml`.
+    /// Load and parse the commits file.
     ///
     /// Returns `Err` if the file is missing or malformed.
     pub fn load(&self) -> Result<CommitsData, VcsError> {
@@ -26,7 +26,7 @@ impl CommitStore {
         Ok(toml::from_str(&text)?)
     }
 
-    /// Serialize and write `commits.toml`, creating parent directories.
+    /// Serialize and write the commits file, creating parent directories.
     pub fn save(&self, data: &CommitsData) -> Result<(), VcsError> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -44,7 +44,8 @@ mod tests {
     #[test]
     fn roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let store = CommitStore::new(dir.path());
+        let file = dir.path().join("commits.toml");
+        let store = CommitStore::new(&file);
         let data = CommitsData::new();
         store.save(&data).unwrap();
         let loaded = store.load().unwrap();

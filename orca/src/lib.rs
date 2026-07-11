@@ -24,6 +24,9 @@ mod exec_spec;
 mod lock;
 mod workspace;
 
+/// The file name to store the commit and metadata
+pub const COMMIT_FILE_NAME: &str = "commits.toml";
+
 pub use env::{Env, EnvError, EnvSettings, EnvStore, orca_root};
 pub use exec_spec::{ExecSpec, ExecSpecError, Invocation, UserIdentity, resolve_run_target};
 pub use lock::{LockError, LockFile};
