@@ -14,7 +14,7 @@ use crate::layer::{Layer, Upper};
 /// Static runtime defaults *declared by the image*.
 ///
 /// This is pure image data: for pulled images it comes from the OCI config
-/// (via `images.toml`); host-based environments declare nothing, so their
+/// (via the image index); host-based environments declare nothing, so their
 /// config is [`ImageConfig::default`] (empty). The process environment is
 /// never consulted here — resolving the actual argv / env / cwd for a run
 /// is policy and lives in the `orca` crate (`ExecSpec`).

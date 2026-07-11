@@ -1,7 +1,7 @@
 //! `orca init / use / ls / rm / clean`.
 
 use anyhow::Context;
-use orca::{EnvStore, LockFile, Workspace, COMMIT_FILE_NAME};
+use orca::{COMMIT_FILE_NAME, EnvStore, IMAGE_FILE_NAME, LockFile, Workspace};
 use orca_image::BaseImageRef;
 use orca_image::external_image::{Downloader, ImageIndex, LayerBlobStore};
 use orca_vcs::{CommitStore, CommitsData};
@@ -21,7 +21,7 @@ pub fn init(
         Some(reference) => {
             let root = orca::orca_root();
             let images_dir = root.join("images");
-            let mut index = ImageIndex::load(&images_dir)?;
+            let mut index = ImageIndex::load(&images_dir.join(IMAGE_FILE_NAME))?;
             let digest = match index.resolve(reference) {
                 Ok(manifest) => manifest.digest,
                 Err(_) => {

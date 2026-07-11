@@ -3,12 +3,13 @@
 use std::path::Path;
 
 use anyhow::Context;
+use orca::IMAGE_FILE_NAME;
 use orca_image::external_image::{Downloader, ImageIndex, LayerBlobStore};
 
 /// `orca image pull <reference>`.
 pub fn pull(root: &Path, reference: &str) -> anyhow::Result<()> {
     let images_dir = root.join("images");
-    let mut index = ImageIndex::load(&images_dir)?;
+    let mut index = ImageIndex::load(&images_dir.join(IMAGE_FILE_NAME))?;
     if index.resolve(reference).is_ok() {
         println!("{reference} is already pulled");
         return Ok(());
@@ -31,7 +32,7 @@ pub fn pull(root: &Path, reference: &str) -> anyhow::Result<()> {
 
 /// `orca image ls`.
 pub fn ls(root: &Path) -> anyhow::Result<()> {
-    let index = ImageIndex::load(&root.join("images"))?;
+    let index = ImageIndex::load(&root.join("images").join(IMAGE_FILE_NAME))?;
     println!(
         "{:<40} {:<15} {:<14} PULLED",
         "REPOSITORY", "TAG", "DIGEST"
@@ -58,7 +59,7 @@ pub fn ls(root: &Path) -> anyhow::Result<()> {
 /// reference-set based).
 pub fn rm(root: &Path, reference: &str) -> anyhow::Result<()> {
     let images_dir = root.join("images");
-    let mut index = ImageIndex::load(&images_dir)?;
+    let mut index = ImageIndex::load(&images_dir.join(IMAGE_FILE_NAME))?;
     index.remove(reference)?;
     index.save()?;
     let blobs = LayerBlobStore::new(&images_dir.join("layers").join("sha256"));

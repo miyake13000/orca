@@ -25,7 +25,7 @@ use orca_vcs::{Commit, CommitBuilder, CommitStore, CommitsData, Head, Vcs, VcsEr
 use crate::apply::{self, ApplyError};
 use crate::env::Env;
 use crate::lock::{LockError, LockFile};
-use crate::COMMIT_FILE_NAME;
+use crate::{COMMIT_FILE_NAME, IMAGE_FILE_NAME};
 
 /// Errors from workspace operations.
 #[derive(Debug, thiserror::Error)]
@@ -197,7 +197,7 @@ impl<'a> Workspace<'a> {
             // resolved by ExecSpec from the invocation context.
             BaseImageRef::Host => (Base::Host, ImageConfig::default()),
             BaseImageRef::External { image_digest } => {
-                let index = ImageIndex::load(&self.env.images_path())?;
+                let index = ImageIndex::load(&self.env.images_path().join(IMAGE_FILE_NAME))?;
                 let manifest = index.find_by_digest(image_digest)?;
                 let blobs = LayerBlobStore::new(&self.env.blob_store_path());
                 let layers = blobs.resolve(&manifest.layers_top_first())?;
@@ -561,7 +561,7 @@ mod tests {
                 .save(&CommitsData::new())
                 .unwrap();
             std::fs::create_dir_all(env.blob_store_path().join(layer.to_string())).unwrap();
-            let mut index = ImageIndex::load(&env.images_path()).unwrap();
+            let mut index = ImageIndex::load(&env.images_path().join(IMAGE_FILE_NAME)).unwrap();
             index.insert(ImageManifest {
                 digest,
                 registry: "docker.io".into(),

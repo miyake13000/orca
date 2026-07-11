@@ -27,6 +27,9 @@ mod workspace;
 /// The file name to store the commit and metadata
 pub const COMMIT_FILE_NAME: &str = "commits.toml";
 
+/// The file name to store the index of pulled images
+pub const IMAGE_FILE_NAME: &str = "images.toml";
+
 pub use env::{Env, EnvError, EnvSettings, EnvStore, orca_root};
 pub use exec_spec::{ExecSpec, ExecSpecError, Invocation, UserIdentity, resolve_run_target};
 pub use lock::{LockError, LockFile};

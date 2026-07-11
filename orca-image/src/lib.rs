@@ -10,7 +10,7 @@
 //! - [`Image`] / [`Base`] / [`ImageConfig`] — the material a container runs
 //!   from. Mounting it is *not* this crate's concern (the `OverlayMount`
 //!   trait lives in `orca-container`).
-//! - [`external_image`] — pulled OCI images: `images.toml` index, blob CAS
+//! - [`external_image`] — pulled OCI images: image index, blob CAS
 //!   and the registry downloader.
 //!
 //! On-disk layers are always stored in the OverlayFS native format:
@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 
 /// Reference to the base an environment was created from.
 ///
-/// Stored in `envs.toml` as `base = { type = "host" }` or
+/// Serialized as `base = { type = "host" }` or
 /// `base = { type = "external", image_digest = "<hex>" }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -46,7 +46,7 @@ pub enum BaseImageRef {
     Host,
     /// A pulled OCI image, identified by its manifest digest.
     External {
-        /// Manifest digest keying into `images.toml`.
+        /// Manifest digest keying into the image index.
         image_digest: ImageDigest,
     },
 }

@@ -1,4 +1,4 @@
-//! Pulled OCI images: reference parsing, `images.toml` index, blob store
+//! Pulled OCI images: reference parsing, image index, blob store
 //! and registry downloader.
 //!
 //! Responsibilities are split three ways (DESIGN §8): tag resolution
@@ -26,27 +26,27 @@ use crate::image::ImageConfig;
 /// Errors from the image index and reference handling.
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError {
-    /// The requested image is not in `images.toml`.
+    /// The requested image is not in the index.
     #[error("image not found: {0} (try `orca image pull {0}`)")]
     NotFound(String),
-    /// No image with the given digest is in `images.toml`.
+    /// No image with the given digest is in the index.
     #[error("image not found for digest {0}")]
     DigestNotFound(String),
     /// A digest string was not `sha256:<hex>` / `<hex>`.
     #[error("invalid digest: {0}")]
     InvalidDigest(String),
-    /// images.toml could not be read or written.
-    #[error("failed to access images.toml: {0}")]
+    /// The index file could not be read or written.
+    #[error("failed to access image index: {0}")]
     Io(#[from] std::io::Error),
-    /// images.toml could not be parsed.
-    #[error("failed to parse images.toml: {0}")]
+    /// The index file could not be parsed.
+    #[error("failed to parse image index: {0}")]
     Parse(#[from] toml::de::Error),
-    /// images.toml could not be serialized.
-    #[error("failed to serialize images.toml: {0}")]
+    /// The index file could not be serialized.
+    #[error("failed to serialize image index: {0}")]
     Serialize(#[from] toml::ser::Error),
 }
 
-/// Digest of an image manifest (the `images.toml` key). Always sha256.
+/// Digest of an image manifest (the index key). Always sha256.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ImageDigest(#[serde(with = "hash_serde")] pub Hash);
@@ -127,7 +127,7 @@ impl fmt::Display for Reference {
     }
 }
 
-/// One `images.toml` record: fully resolved metadata of a pulled image.
+/// One index record: fully resolved metadata of a pulled image.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageManifest {
     /// Manifest digest (identity of the pulled image).
@@ -177,25 +177,26 @@ impl ImageManifest {
     }
 }
 
-/// On-disk shape of `images.toml`.
+/// On-disk shape of the index file.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct IndexFile {
     #[serde(default)]
     images: Vec<ImageManifest>,
 }
 
-/// The `images.toml` index: resolves references and digests to
-/// [`ImageManifest`] records.
+/// The image index: resolves references and digests to
+/// [`ImageManifest`] records, backed by a TOML file at a caller-supplied
+/// path.
 pub struct ImageIndex {
     path: PathBuf,
     images: Vec<ImageManifest>,
 }
 
 impl ImageIndex {
-    /// Load the index from the `images/` directory (missing file = empty
+    /// Load the index from the file at `file_path` (missing file = empty
     /// index).
-    pub fn load(base_path: &Path) -> Result<Self, IndexError> {
-        let path = base_path.join("images.toml");
+    pub fn load(file_path: &Path) -> Result<Self, IndexError> {
+        let path = file_path.to_path_buf();
         let images = match std::fs::read_to_string(&path) {
             Ok(text) => toml::from_str::<IndexFile>(&text)?.images,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -329,12 +330,13 @@ mod tests {
     #[test]
     fn index_roundtrip_and_lookup() {
         let dir = tempfile::tempdir().unwrap();
-        let mut index = ImageIndex::load(dir.path()).unwrap();
+        let file = dir.path().join("images.toml");
+        let mut index = ImageIndex::load(&file).unwrap();
         index.insert(manifest("24.04", 1));
         index.insert(manifest("25.04", 2));
         index.save().unwrap();
 
-        let index = ImageIndex::load(dir.path()).unwrap();
+        let index = ImageIndex::load(&file).unwrap();
         assert_eq!(index.list().len(), 2);
         let m = index.resolve("ubuntu:24.04").unwrap();
         assert_eq!(m.digest, ImageDigest([1; 32]));
@@ -346,7 +348,7 @@ mod tests {
     #[test]
     fn insert_replaces_same_tag() {
         let dir = tempfile::tempdir().unwrap();
-        let mut index = ImageIndex::load(dir.path()).unwrap();
+        let mut index = ImageIndex::load(&dir.path().join("images.toml")).unwrap();
         index.insert(manifest("24.04", 1));
         index.insert(manifest("24.04", 3));
         assert_eq!(index.list().len(), 1);
