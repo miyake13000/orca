@@ -1,23 +1,19 @@
 //! `orca image pull / ls / rm`.
 
-use std::path::Path;
-
 use anyhow::Context;
-use orca::IMAGE_FILE_NAME;
-use orca_image::external_image::{Downloader, ImageIndex, LayerBlobStore};
+use orca::Orca;
 
 /// `orca image pull <reference>`.
-pub fn pull(root: &Path, reference: &str) -> anyhow::Result<()> {
-    let images_dir = root.join("images");
-    let mut index = ImageIndex::load(&images_dir.join(IMAGE_FILE_NAME))?;
-    if index.resolve(reference).is_ok() {
+pub fn pull(orca: &Orca, reference: &str) -> anyhow::Result<()> {
+    let images = orca.external_images();
+    if images.find(reference)?.is_some() {
         println!("{reference} is already pulled");
         return Ok(());
     }
-    let blobs = LayerBlobStore::new(&images_dir.join("layers").join("sha256"));
     println!("pulling {reference}...");
-    let manifest =
-        Downloader::pull(reference, &blobs).with_context(|| format!("failed to pull {reference}"))?;
+    let manifest = images
+        .pull(reference)
+        .with_context(|| format!("failed to pull {reference}"))?;
     println!(
         "pulled {}/{}:{} ({} layer(s))",
         manifest.registry,
@@ -25,19 +21,16 @@ pub fn pull(root: &Path, reference: &str) -> anyhow::Result<()> {
         manifest.tag,
         manifest.layer_digests.len()
     );
-    index.insert(manifest);
-    index.save()?;
     Ok(())
 }
 
 /// `orca image ls`.
-pub fn ls(root: &Path) -> anyhow::Result<()> {
-    let index = ImageIndex::load(&root.join("images").join(IMAGE_FILE_NAME))?;
+pub fn ls(orca: &Orca) -> anyhow::Result<()> {
     println!(
         "{:<40} {:<15} {:<14} PULLED",
         "REPOSITORY", "TAG", "DIGEST"
     );
-    for image in index.list() {
+    for image in orca.external_images().list()? {
         let repo = if image.registry == "docker.io" {
             image.repository.clone()
         } else {
@@ -54,16 +47,10 @@ pub fn ls(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `orca image rm <reference>`: drop the record, then prune blobs no
-/// image references anymore (layers are shared, so deletion is
-/// reference-set based).
-pub fn rm(root: &Path, reference: &str) -> anyhow::Result<()> {
-    let images_dir = root.join("images");
-    let mut index = ImageIndex::load(&images_dir.join(IMAGE_FILE_NAME))?;
-    index.remove(reference)?;
-    index.save()?;
-    let blobs = LayerBlobStore::new(&images_dir.join("layers").join("sha256"));
-    blobs.gc(&index.referenced_layers())?;
+/// `orca image rm <reference>` (unreferenced blobs are pruned by the
+/// store).
+pub fn rm(orca: &Orca, reference: &str) -> anyhow::Result<()> {
+    orca.external_images().remove(reference)?;
     println!("removed {reference}");
     Ok(())
 }

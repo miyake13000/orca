@@ -4,8 +4,16 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use orca_image::BaseImageRef;
+use orca_vcs::{CommitStore, CommitsData};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::external_image_store::ExternalImageStore;
+use crate::image::{Image, ImageError};
+use crate::lock::{LockError, LockFile};
+
+/// File name of the commit graph inside `envs/<uuid>/`.
+const COMMIT_FILE_NAME: &str = "commits.toml";
 
 /// Errors from environment management.
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +40,20 @@ pub enum EnvError {
     /// envs.toml could not be serialized.
     #[error("failed to serialize envs.toml: {0}")]
     Serialize(#[from] toml::ser::Error),
+    /// A live container holds the environment (delete refused).
+    #[error("a container is running in {name} (pid {pid}); stop it first")]
+    Running {
+        /// The environment's name.
+        name: String,
+        /// The container's init pid on the host.
+        pid: i32,
+    },
+    /// The run lock could not be inspected.
+    #[error(transparent)]
+    Lock(#[from] LockError),
+    /// The initial commit graph could not be written.
+    #[error("failed to initialize the commit graph: {0}")]
+    Vcs(#[from] orca_vcs::VcsError),
 }
 
 /// The orca data root: `$ORCA_ROOT` if set (mainly for tests), otherwise
@@ -141,6 +163,11 @@ impl Env {
         self.root.join("envs").join(self.uuid.to_string())
     }
 
+    /// The commit graph file (`envs/<uuid>/commits.toml`).
+    pub fn commits_path(&self) -> PathBuf {
+        self.env_path().join(COMMIT_FILE_NAME)
+    }
+
     /// The writable upper (`envs/<uuid>/diff/`).
     pub fn upper_path(&self) -> PathBuf {
         self.env_path().join("diff")
@@ -200,14 +227,17 @@ impl Env {
         self.session_path().join("fake_work")
     }
 
-    /// The shared image area (`images/`).
-    pub fn images_path(&self) -> PathBuf {
-        self.root.join("images")
+    /// The versioned content of this environment (loads the commit graph
+    /// once; the returned [`Image`] is a snapshot of it).
+    pub fn image(&self) -> Result<Image<'_>, ImageError> {
+        Image::open(self)
     }
 
-    /// The extracted-blob CAS (`images/layers/sha256/`).
-    pub fn blob_store_path(&self) -> PathBuf {
-        self.images_path().join("layers").join("sha256")
+    /// The shared external-image area under the same data root. Internal:
+    /// `base_ref` is a foreign key into it, and resolving one's own
+    /// foreign key is this type's job.
+    pub(crate) fn external_images(&self) -> ExternalImageStore {
+        ExternalImageStore::new(&self.root)
     }
 }
 
@@ -231,13 +261,11 @@ pub struct EnvStore {
 }
 
 impl EnvStore {
-    /// Load the store from the `envs/` directory (missing `envs.toml` =
-    /// empty store). The orca root is derived as its parent.
-    pub fn load(base_path: &Path) -> Result<Self, EnvError> {
-        let root = base_path
-            .parent()
-            .unwrap_or(base_path)
-            .to_path_buf();
+    /// Load the store from the data root (missing `envs.toml` = empty
+    /// store). Public entry: [`crate::Orca::envs`].
+    pub(crate) fn load(root: &Path) -> Result<Self, EnvError> {
+        let root = root.to_path_buf();
+        let base_path = root.join("envs");
         let file = base_path.join("envs.toml");
         let mut data: EnvsFile = match std::fs::read_to_string(&file) {
             Ok(text) => toml::from_str(&text)?,
@@ -252,9 +280,18 @@ impl EnvStore {
         }
         Ok(Self {
             root,
-            envs_dir: base_path.to_path_buf(),
+            envs_dir: base_path,
             data,
         })
+    }
+
+    /// The target environment: `Some(selector)` resolves a name or uuid,
+    /// `None` falls back to the current environment.
+    pub fn env(&self, selector: Option<&str>) -> Result<&Env, EnvError> {
+        match selector {
+            Some(target) => self.resolve(target),
+            None => self.current(),
+        }
     }
 
     /// Find an environment by name.
@@ -286,7 +323,9 @@ impl EnvStore {
     }
 
     /// Create a new environment: validates the name, allocates a uuid,
-    /// and creates `envs/<uuid>/diff/` and `envs/<uuid>/layers/`.
+    /// creates `envs/<uuid>/diff/` and `envs/<uuid>/layers/`, and writes
+    /// the initial commit graph (an env without one would be broken —
+    /// [`Env::image`] requires it).
     /// Does not touch `current` (the CLI decides) and does not save.
     pub fn create(&mut self, name: String, base_ref: BaseImageRef) -> Result<&Env, EnvError> {
         if name.is_empty() || name.contains('/') || name == "ROOT" {
@@ -309,15 +348,23 @@ impl EnvStore {
         };
         std::fs::create_dir_all(env.upper_path())?;
         std::fs::create_dir_all(env.layers_path())?;
+        CommitStore::new(&env.commits_path()).save(&CommitsData::new())?;
         self.data.envs.push(env);
         Ok(self.data.envs.last().expect("just pushed"))
     }
 
     /// Delete an environment: removes `envs/<uuid>/` and `run/<uuid>/`
     /// and drops the record; unsets `current` if it pointed here.
-    /// The caller must have verified no container is running.
+    /// Refuses while a container is running (stale locks are cleaned by
+    /// the check).
     pub fn delete(&mut self, uuid: &Uuid) -> Result<(), EnvError> {
         let env = self.find_by_id(uuid)?;
+        if let Some(pid) = LockFile::check(&env.lock_path())? {
+            return Err(EnvError::Running {
+                name: env.name.clone(),
+                pid,
+            });
+        }
         let env_path = env.env_path();
         let run_path = self.root.join("run").join(uuid.to_string());
         for path in [env_path, run_path] {
@@ -371,7 +418,7 @@ mod tests {
     use super::*;
 
     fn store(dir: &Path) -> EnvStore {
-        EnvStore::load(&dir.join("envs")).unwrap()
+        EnvStore::load(dir).unwrap()
     }
 
     #[test]

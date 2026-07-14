@@ -1,16 +1,14 @@
 //! `orca init / use / ls / rm / clean`.
 
 use anyhow::Context;
-use orca::{COMMIT_FILE_NAME, EnvStore, IMAGE_FILE_NAME, LockFile, Workspace};
-use orca_image::BaseImageRef;
-use orca_image::external_image::{Downloader, ImageIndex, LayerBlobStore};
-use orca_vcs::{CommitStore, CommitsData};
+use orca::{BaseImageRef, EnvStore, Orca};
 
 use super::{confirm, select_env};
 
-/// `orca init <name> [--image <ref>] [--keep]`: create an environment
-/// with its initial commit graph, pulling the base image if needed.
+/// `orca init <name> [--image <ref>] [--keep]`: create an environment,
+/// pulling the base image if needed.
 pub fn init(
+    orca: &Orca,
     store: &mut EnvStore,
     name: String,
     image: Option<String>,
@@ -19,20 +17,15 @@ pub fn init(
     let base_ref = match &image {
         None => BaseImageRef::Host,
         Some(reference) => {
-            let root = orca::orca_root();
-            let images_dir = root.join("images");
-            let mut index = ImageIndex::load(&images_dir.join(IMAGE_FILE_NAME))?;
-            let digest = match index.resolve(reference) {
-                Ok(manifest) => manifest.digest,
-                Err(_) => {
+            let images = orca.external_images();
+            let digest = match images.find(reference)? {
+                Some(digest) => digest,
+                None => {
                     println!("pulling {reference}...");
-                    let blobs = LayerBlobStore::new(&images_dir.join("layers").join("sha256"));
-                    let manifest = Downloader::pull(reference, &blobs)
+                    let manifest = images
+                        .pull(reference)
                         .with_context(|| format!("failed to pull {reference}"))?;
-                    let digest = manifest.digest;
-                    index.insert(manifest);
-                    index.save()?;
-                    digest
+                    manifest.digest
                 }
             };
             BaseImageRef::External {
@@ -41,24 +34,18 @@ pub fn init(
         }
     };
 
-    let (uuid, env_path) = {
-        let env = store.create(name.clone(), base_ref)?;
-        let commits_file = env.env_path().join(COMMIT_FILE_NAME);
-        CommitStore::new(&commits_file).save(&CommitsData::new())?;
-        (env.uuid, env.env_path())
-    };
+    let uuid = store.create(name.clone(), base_ref)?.uuid;
     if !keep {
         store.set_current(&uuid)?;
     }
     store.save()?;
     println!("created environment {name} ({uuid})");
-    let _ = env_path; // created above; nothing further to report
     Ok(())
 }
 
 /// `orca use <name-or-uuid>`.
 pub fn use_env(store: &mut EnvStore, target: &str) -> anyhow::Result<()> {
-    let uuid = store.resolve(target)?.uuid;
+    let uuid = store.env(Some(target))?.uuid;
     store.set_current(&uuid)?;
     store.save()?;
     println!("switched to {target}");
@@ -89,14 +76,12 @@ pub fn ls(store: &EnvStore) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `orca rm <name-or-uuid> [--yes]`: refuses while a container runs.
+/// `orca rm <name-or-uuid> [--yes]` (`delete` refuses while a container
+/// runs).
 pub fn rm(store: &mut EnvStore, target: &str, yes: bool) -> anyhow::Result<()> {
-    let env = store.resolve(target)?;
+    let env = store.env(Some(target))?;
     let uuid = env.uuid;
     let name = env.name.clone();
-    if let Some(pid) = LockFile::check(&env.lock_path())? {
-        anyhow::bail!("a container is running in {name} (pid {pid}); stop it first");
-    }
     if !yes && !confirm(&format!("delete environment {name} and all its history?"))? {
         println!("aborted");
         return Ok(());
@@ -110,7 +95,7 @@ pub fn rm(store: &mut EnvStore, target: &str, yes: bool) -> anyhow::Result<()> {
 /// `orca clean`: discard the upper layer of the selected environment.
 pub fn clean(store: &EnvStore, cli_env: &Option<String>) -> anyhow::Result<()> {
     let env = select_env(store, cli_env)?;
-    Workspace::open(env)?.clean()?;
+    env.image()?.clean()?;
     println!("discarded uncommitted changes");
     Ok(())
 }

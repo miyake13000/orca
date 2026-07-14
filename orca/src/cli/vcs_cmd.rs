@@ -1,15 +1,14 @@
 //! `orca commit / diff / log / branch / checkout / reset / rebase /
 //! merge / gc`.
 
-use orca::{EnvStore, Workspace};
-use orca_vcs::Head;
+use orca::{EnvStore, Head};
 
 use super::{format_change, select_env, short_hash};
 
 /// `orca commit -m <message>`.
 pub fn commit(store: &EnvStore, cli_env: &Option<String>, message: &str) -> anyhow::Result<()> {
     let env = select_env(store, cli_env)?;
-    let hash = Workspace::open(env)?.commit(message)?;
+    let hash = env.image()?.commit(message)?;
     println!("committed {}", short_hash(&hash));
     Ok(())
 }
@@ -22,8 +21,8 @@ pub fn diff(
     b: Option<&str>,
 ) -> anyhow::Result<()> {
     let env = select_env(store, cli_env)?;
-    let ws = Workspace::open(env)?;
-    for change in ws.diff(a, b)? {
+    let image = env.image()?;
+    for change in image.diff(a, b)? {
         println!("{}", format_change(&change));
     }
     Ok(())
@@ -32,10 +31,10 @@ pub fn diff(
 /// `orca log`: first-parent history of HEAD with branch decorations.
 pub fn log(store: &EnvStore, cli_env: &Option<String>) -> anyhow::Result<()> {
     let env = select_env(store, cli_env)?;
-    let ws = Workspace::open(env)?;
-    let data = ws.data();
+    let image = env.image()?;
+    let data = image.data();
     let head = data.head();
-    for commit in ws.log() {
+    for commit in image.log() {
         let mut decorations: Vec<String> = Vec::new();
         if head.commit_hash() == *commit.hash() {
             match head.branch_name() {
@@ -79,17 +78,17 @@ pub fn branch(
     all: bool,
 ) -> anyhow::Result<()> {
     let env = select_env(store, cli_env)?;
-    let mut ws = Workspace::open(env)?;
+    let mut image = env.image()?;
     if let Some(name) = delete {
-        ws.branch_delete(&name)?;
+        image.branch_delete(&name)?;
         println!("deleted branch {name}");
     } else if let Some(name) = name {
-        ws.branch_create(&name)?;
+        image.branch_create(&name)?;
         println!("created branch {name}");
     } else {
         // -a or bare `orca branch`: list.
         let _ = all;
-        let data = ws.data();
+        let data = image.data();
         let current = data.head().branch_name();
         for branch in data.branches() {
             let marker = if Some(branch.name()) == current { "*" } else { " " };
@@ -112,15 +111,15 @@ pub fn checkout(
     new_branch: Option<String>,
 ) -> anyhow::Result<()> {
     let env = select_env(store, cli_env)?;
-    let mut ws = Workspace::open(env)?;
+    let mut image = env.image()?;
     if let Some(name) = new_branch {
-        ws.branch_create(&name)?;
-        ws.checkout(&name)?;
+        image.branch_create(&name)?;
+        image.checkout(&name)?;
         println!("switched to new branch {name}");
         return Ok(());
     }
     let target = target.expect("clap enforces target xor -b");
-    match ws.checkout(&target)? {
+    match image.checkout(&target)? {
         Head::Branch(name) => println!("switched to branch {name}"),
         Head::Detached(hash) => println!(
             "HEAD is now detached at {} (commits are disabled)",
@@ -133,7 +132,7 @@ pub fn checkout(
 /// `orca reset <commit>`.
 pub fn reset(store: &EnvStore, cli_env: &Option<String>, commit: &str) -> anyhow::Result<()> {
     let env = select_env(store, cli_env)?;
-    let hash = Workspace::open(env)?.reset(commit)?;
+    let hash = env.image()?.reset(commit)?;
     println!("reset to {}", short_hash(&hash));
     Ok(())
 }
@@ -146,24 +145,23 @@ pub fn rebase(
     target: &str,
 ) -> anyhow::Result<()> {
     let env = select_env(store, cli_env)?;
-    Workspace::open(env)?.rebase(newbase, target)?;
+    env.image()?.rebase(newbase, target)?;
     println!("rebased {target} onto {newbase}");
     Ok(())
 }
 
-/// `orca merge <branch>`: reserved; always reports the rebase
-/// alternative via [`orca_vcs::VcsError::MergeUnimplemented`].
+/// `orca merge <branch>`: reserved; `Image::merge` always reports
+/// the rebase alternative.
 pub fn merge(store: &EnvStore, cli_env: &Option<String>, branch: &str) -> anyhow::Result<()> {
     let env = select_env(store, cli_env)?;
-    Workspace::open(env)?; // validate the environment before reporting
-    let _ = branch;
-    Err(orca_vcs::VcsError::MergeUnimplemented.into())
+    env.image()?.merge(branch)?;
+    Ok(())
 }
 
 /// `orca gc`.
 pub fn gc(store: &EnvStore, cli_env: &Option<String>) -> anyhow::Result<()> {
     let env = select_env(store, cli_env)?;
-    let dead = Workspace::open(env)?.gc()?;
+    let dead = env.image()?.gc()?;
     println!("removed {} unreachable commit(s)", dead.len());
     Ok(())
 }

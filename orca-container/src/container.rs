@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use nix::sched::CloneFlags;
 use nix::unistd::Pid;
-use orca_image::Image;
+use orca_image::ContainerImage;
 
 use crate::image::SessionPaths;
 use crate::mount::MountError;
@@ -141,7 +141,7 @@ pub struct Terminated {
 /// `Terminated`). Holds no lock — run-lock lifecycle belongs to the `orca`
 /// crate.
 pub struct Container<S> {
-    image: Image,
+    image: ContainerImage,
     session: SessionPaths,
     opts: NamespaceOpts,
     io: IoMode,
@@ -308,7 +308,7 @@ impl Container<Running> {
 
 impl Container<Terminated> {
     /// The image the container ran from.
-    pub fn image(&self) -> &Image {
+    pub fn image(&self) -> &ContainerImage {
         &self.image
     }
 
@@ -342,7 +342,7 @@ fn build_clone_flags(opts: &NamespaceOpts) -> CloneFlags {
 /// here already resolved by the `orca` crate's `ExecSpec` (policy); this
 /// builder never consults the image config or the process environment.
 pub struct ContainerBuilder {
-    image: Image,
+    image: ContainerImage,
     session: SessionPaths,
     opts: NamespaceOpts,
     io: IoMode,
@@ -357,7 +357,7 @@ impl ContainerBuilder {
     /// Start building a container for `image` with session paths prepared
     /// by the caller. Defaults: pid/uts/ipc unshared, network shared,
     /// piped IO, empty env, cwd `/`, no privilege drop.
-    pub fn new(image: Image, session: SessionPaths) -> Self {
+    pub fn new(image: ContainerImage, session: SessionPaths) -> Self {
         Self {
             image,
             session,

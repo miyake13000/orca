@@ -1,4 +1,4 @@
-//! [`Image`]: the material a container runs from (upper + lower stack +
+//! [`ContainerImage`]: the material a container runs from (upper + lower stack +
 //! base + config).
 //!
 //! Host-based and image-based environments are "the same thing with a
@@ -42,7 +42,7 @@ impl Default for ImageConfig {
     }
 }
 
-/// The base an [`Image`] sits on: the live host rootfs or the extracted
+/// The base a [`ContainerImage`] sits on: the live host rootfs or the extracted
 /// layers of a pulled image.
 #[derive(Debug, Clone)]
 pub enum Base {
@@ -56,11 +56,11 @@ pub enum Base {
 /// Everything needed to run or diff an environment: the writable upper,
 /// the committed lower stack, the base, and the runtime config.
 ///
-/// `Image` is pure material — it can be *stacked* (for diff) and *described*
+/// `ContainerImage` is pure material — it can be *stacked* (for diff) and *described*
 /// (config), but mounting it is done via the `OverlayMount` trait that
 /// `orca-container` implements for it.
 #[derive(Debug, Clone)]
-pub struct Image {
+pub struct ContainerImage {
     /// The writable layer (`envs/<uuid>/diff/`).
     pub upper: Upper,
     /// Committed layers of the environment's history, newest first.
@@ -71,7 +71,7 @@ pub struct Image {
     pub config: ImageConfig,
 }
 
-impl Image {
+impl ContainerImage {
     /// The stack `orca diff` compares the upper against: committed layers
     /// plus the base (host `/` or image layers), top to bottom.
     pub fn baseline(&self) -> Vec<Layer> {

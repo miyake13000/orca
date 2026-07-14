@@ -4,7 +4,7 @@
 //! Run with: `sudo -E cargo test -p orca-container -- --ignored`
 
 use orca_container::{ContainerBuilder, IoMode, RunAs, SessionPaths};
-use orca_image::{Base, Image, ImageConfig, Layer, Upper};
+use orca_image::{Base, ContainerImage, ImageConfig, Layer, Upper};
 
 const TEST_PATH: &str = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
@@ -20,8 +20,8 @@ fn session_in(dir: &std::path::Path) -> SessionPaths {
     }
 }
 
-fn host_image(upper: &std::path::Path) -> Image {
-    Image {
+fn host_image(upper: &std::path::Path) -> ContainerImage {
+    ContainerImage {
         upper: Upper::new(upper.to_path_buf()),
         lower: Vec::<Layer>::new(),
         base: Base::Host,
@@ -74,7 +74,7 @@ fn init_failure_is_reported_not_hung() {
 
     // A lower that does not exist makes the overlay mount fail; the child
     // must report the stage over the status pipe instead of hanging.
-    let image = Image {
+    let image = ContainerImage {
         upper: Upper::new(upper),
         lower: vec![Layer::new(dir.path().join("no-such-layer"))],
         base: Base::Host,

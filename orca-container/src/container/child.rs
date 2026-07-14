@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use nix::mount::MsFlags;
 use nix::sys::stat::{Mode, SFlag, makedev, mknod};
-use orca_image::Image;
+use orca_image::ContainerImage;
 
 use crate::image::{OverlayMount, SessionPaths};
 use crate::mount::{self, PseudoMount};
@@ -29,7 +29,7 @@ use super::{IoMode, RunAs};
 /// Everything the child needs, borrowed from the parent's (copied)
 /// address space.
 pub(crate) struct ChildConfig<'a> {
-    pub image: &'a Image,
+    pub image: &'a ContainerImage,
     pub session: &'a SessionPaths,
     pub io: IoMode,
     pub cmd: &'a [String],

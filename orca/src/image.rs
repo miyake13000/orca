@@ -1,35 +1,37 @@
-//! [`Workspace`]: the facade for every operation touching history or
-//! layers.
+//! [`Image`]: the versioned content of one environment.
 //!
-//! A `Workspace` binds a resolved [`Env`] to its commit store, layer store
-//! and loaded commit graph, and centralizes the preconditions (DESIGN §6):
+//! An `Image` is the env directory's substance seen as one object — the
+//! writable upper, the committed layer stack and the commit graph — and
+//! carries every operation on it: running a container from it, version
+//! control (commit / checkout / reset / branch / rebase / gc / log),
+//! diffing, and applying to the host ([`ApplyPlan`]).
 //!
-//! - operations that rename/destroy `diff/` or layers refuse to run while
-//!   a container is live (`LockFile::check`; stale locks are cleaned);
-//! - operations that change the lower stack (checkout / reset / rebase)
-//!   additionally require an empty `diff/`.
+//! Obtained via [`Env::image`], which loads the commit graph once; an
+//! `Image` is a snapshot, and mutating operations save back through it.
+//! Each operation performs the preconditions *it* needs at its entry
+//! (DESIGN §6) using the shared private helpers below:
 //!
-//! `orca run` is *not* here: the CLI drives `orca-container` directly,
-//! sharing only the lock protocol (it acquires; we check).
+//! - `ensure_not_running` — refuse while a container is live
+//!   (`LockFile::check`; stale locks are cleaned);
+//! - `ensure_clean` — operations that change the lower stack
+//!   (checkout / reset / rebase) require an empty `diff/`.
 
 use orca_hash::{Hash, to_hex};
-use orca_image::external_image::{
-    BlobStoreError, ImageIndex, IndexError, LayerBlobStore,
-};
 use orca_image::{
-    Base, BaseImageRef, Blacklist, Change, DiffError, Image, ImageConfig, Layer, LayerStore,
-    LayerStoreError, Upper, changes,
+    Base, BaseImageRef, Blacklist, Change, ContainerImage, DiffError, ImageConfig, Layer,
+    LayerStore, LayerStoreError, Upper, changes,
 };
 use orca_vcs::{Commit, CommitBuilder, CommitStore, CommitsData, Head, Vcs, VcsError};
 
 use crate::apply::{self, ApplyError};
 use crate::env::Env;
+use crate::external_image_store::ExternalImageError;
 use crate::lock::{LockError, LockFile};
-use crate::{COMMIT_FILE_NAME, IMAGE_FILE_NAME};
+use crate::run::{RunError, RunOpts};
 
-/// Errors from workspace operations.
+/// Errors from image operations.
 #[derive(Debug, thiserror::Error)]
-pub enum WorkspaceError {
+pub enum ImageError {
     /// A live container holds the environment.
     #[error("a container is running in this environment (pid {0}); stop it first")]
     Running(i32),
@@ -48,6 +50,9 @@ pub enum WorkspaceError {
     /// An unfinished apply journal exists; resolve it first.
     #[error("an unfinished apply journal exists; run `orca apply` to resolve it")]
     ApplyPending,
+    /// Applying to the host needs an effective uid of 0.
+    #[error("orca apply requires root (try sudo, or a setuid-root install)")]
+    RootRequired,
     /// Version-control error.
     #[error(transparent)]
     Vcs(#[from] VcsError),
@@ -57,12 +62,9 @@ pub enum WorkspaceError {
     /// Diff computation error.
     #[error(transparent)]
     Diff(#[from] DiffError),
-    /// Image index error.
+    /// External image error (index lookup, blob resolution).
     #[error(transparent)]
-    Index(#[from] IndexError),
-    /// Blob store error.
-    #[error(transparent)]
-    Blob(#[from] BlobStoreError),
+    ExternalImage(#[from] ExternalImageError),
     /// Lock error.
     #[error(transparent)]
     Lock(#[from] LockError),
@@ -74,8 +76,9 @@ pub enum WorkspaceError {
     Io(#[from] std::io::Error),
 }
 
-/// Facade over one environment's history and layers.
-pub struct Workspace<'a> {
+/// The versioned content of one environment: upper + committed layers +
+/// commit graph, with every operation on them.
+pub struct Image<'a> {
     env: &'a Env,
     commit_store: CommitStore,
     layer_store: LayerStore,
@@ -85,12 +88,11 @@ pub struct Workspace<'a> {
     blacklist: Blacklist,
 }
 
-impl<'a> Workspace<'a> {
-    /// Open the workspace: construct the stores, load `commits.toml`,
-    /// and parse the env's diff blacklist.
-    pub fn open(env: &'a Env) -> Result<Self, WorkspaceError> {
-        let commits_file = env.env_path().join(COMMIT_FILE_NAME);
-        let commit_store = CommitStore::new(&commits_file);
+impl<'a> Image<'a> {
+    /// Open the image: construct the stores, load the commit graph once,
+    /// and parse the env's diff blacklist. Public entry: [`Env::image`].
+    pub(crate) fn open(env: &'a Env) -> Result<Self, ImageError> {
+        let commit_store = CommitStore::new(&env.commits_path());
         let layer_store = LayerStore::new(&env.layers_path());
         let commits = commit_store.load()?;
         let blacklist = Blacklist::parse(&env.settings().blacklist);
@@ -114,7 +116,7 @@ impl<'a> Workspace<'a> {
         &self.commits
     }
 
-    /// The environment this workspace operates on.
+    /// The environment this image belongs to.
     pub fn env(&self) -> &Env {
         self.env
     }
@@ -123,19 +125,19 @@ impl<'a> Workspace<'a> {
 
     /// Refuse to proceed while a live container holds the environment
     /// (stale locks are cleaned by `check`).
-    fn ensure_not_running(&self) -> Result<(), WorkspaceError> {
+    fn ensure_not_running(&self) -> Result<(), ImageError> {
         match LockFile::check(&self.env.lock_path())? {
-            Some(pid) => Err(WorkspaceError::Running(pid)),
+            Some(pid) => Err(ImageError::Running(pid)),
             None => Ok(()),
         }
     }
 
     /// Refuse to change the lower stack while `diff/` has content.
-    fn ensure_clean(&self) -> Result<(), WorkspaceError> {
+    fn ensure_clean(&self) -> Result<(), ImageError> {
         if self.upper().is_empty()? {
             Ok(())
         } else {
-            Err(WorkspaceError::NotClean)
+            Err(ImageError::NotClean)
         }
     }
 
@@ -144,7 +146,7 @@ impl<'a> Workspace<'a> {
     /// Resolve a user string to a commit hash: `ROOT`, a full hex hash,
     /// or a unique hex prefix (min 4 chars). Branch names are *not*
     /// resolved here — callers that accept branches check those first.
-    fn resolve_commit(&self, target: &str) -> Result<Hash, WorkspaceError> {
+    fn resolve_commit(&self, target: &str) -> Result<Hash, ImageError> {
         if target == "ROOT" {
             return Ok(*self.commits.root().hash());
         }
@@ -156,24 +158,24 @@ impl<'a> Workspace<'a> {
         if target.len() >= 4 && target.chars().all(|c| c.is_ascii_hexdigit()) {
             let matches = self.commits.find_by_prefix(target);
             return match matches.len() {
-                0 => Err(WorkspaceError::UnknownTarget(target.to_string())),
+                0 => Err(ImageError::UnknownTarget(target.to_string())),
                 1 => Ok(*matches[0].hash()),
-                _ => Err(WorkspaceError::AmbiguousTarget(target.to_string())),
+                _ => Err(ImageError::AmbiguousTarget(target.to_string())),
             };
         }
-        Err(WorkspaceError::UnknownTarget(target.to_string()))
+        Err(ImageError::UnknownTarget(target.to_string()))
     }
 
     /// The layer stack (newest first) of the history ending at `commit`,
     /// following first parents down to the root.
-    fn stack_of(&self, commit: Hash) -> Result<Vec<Layer>, WorkspaceError> {
+    fn stack_of(&self, commit: Hash) -> Result<Vec<Layer>, ImageError> {
         let mut hashes = Vec::new();
         let mut cursor = Some(commit);
         while let Some(hash) = cursor {
             let c = self
                 .commits
                 .find(&hash)
-                .ok_or_else(|| WorkspaceError::UnknownTarget(to_hex(&hash)))?;
+                .ok_or_else(|| ImageError::UnknownTarget(to_hex(&hash)))?;
             if let Some(layer) = c.layer_hash() {
                 hashes.push(*layer);
             }
@@ -187,9 +189,9 @@ impl<'a> Workspace<'a> {
         Upper::new(self.env.upper_path())
     }
 
-    /// Assemble the full [`Image`] for the current HEAD (used by `orca
-    /// run` via the CLI, and by diff).
-    pub fn image(&self) -> Result<Image, WorkspaceError> {
+    /// Assemble the [`ContainerImage`] (mount material) for the current
+    /// HEAD (used by [`Image::run`] and by diff).
+    pub(crate) fn container_image(&self) -> Result<ContainerImage, ImageError> {
         let head_hash = self.commits.head().commit_hash();
         let lower = self.stack_of(head_hash)?;
         let (base, config) = match &self.env.base_ref {
@@ -197,19 +199,30 @@ impl<'a> Workspace<'a> {
             // resolved by ExecSpec from the invocation context.
             BaseImageRef::Host => (Base::Host, ImageConfig::default()),
             BaseImageRef::External { image_digest } => {
-                let index = ImageIndex::load(&self.env.images_path().join(IMAGE_FILE_NAME))?;
-                let manifest = index.find_by_digest(image_digest)?;
-                let blobs = LayerBlobStore::new(&self.env.blob_store_path());
-                let layers = blobs.resolve(&manifest.layers_top_first())?;
+                let images = self.env.external_images();
+                let manifest = images.manifest(image_digest)?;
+                let layers = images.layers(&manifest)?;
                 (Base::Guest(layers), manifest.config())
             }
         };
-        Ok(Image {
+        Ok(ContainerImage {
             upper: self.upper(),
             lower,
             base,
             config,
         })
+    }
+
+    // ----- run ---------------------------------------------------------
+
+    /// Run a container from this image. Returns the child's exit code.
+    ///
+    /// The whole policy lives in the internal `run` module: ExecSpec
+    /// resolution, the lock lifecycle (acquired before the container
+    /// starts, held until after `wait()`), and the launch itself.
+    pub fn run(&self, opts: RunOpts) -> Result<i32, RunError> {
+        let material = self.container_image()?;
+        crate::run::run(self.env, material, opts)
     }
 
     // ----- operations -------------------------------------------------
@@ -219,7 +232,7 @@ impl<'a> Workspace<'a> {
     ///
     /// Preconditions: no running container; HEAD on a branch (detached
     /// commit is rejected by [`Vcs::commit`]).
-    pub fn commit(&mut self, message: &str) -> Result<Hash, WorkspaceError> {
+    pub fn commit(&mut self, message: &str) -> Result<Hash, ImageError> {
         self.ensure_not_running()?;
         let parent = self.commits.head().commit_hash();
         let upper = self.upper();
@@ -241,7 +254,7 @@ impl<'a> Workspace<'a> {
 
     /// Checkout a branch (HEAD follows it) or a commit / `ROOT` (detached
     /// HEAD). Preconditions: no running container, clean upper.
-    pub fn checkout(&mut self, target: &str) -> Result<Head, WorkspaceError> {
+    pub fn checkout(&mut self, target: &str) -> Result<Head, ImageError> {
         self.ensure_not_running()?;
         self.ensure_clean()?;
         let head = if self.commits.branch(target).is_some() {
@@ -257,7 +270,7 @@ impl<'a> Workspace<'a> {
     /// Hard reset the current branch to `target` (a commit hash / prefix
     /// / `ROOT`). Preconditions: no running container, clean upper, HEAD
     /// on a branch.
-    pub fn reset(&mut self, target: &str) -> Result<Hash, WorkspaceError> {
+    pub fn reset(&mut self, target: &str) -> Result<Hash, ImageError> {
         self.ensure_not_running()?;
         self.ensure_clean()?;
         let hash = self.resolve_commit(target)?;
@@ -265,21 +278,21 @@ impl<'a> Workspace<'a> {
             .commits
             .find(&hash)
             .cloned()
-            .ok_or_else(|| WorkspaceError::UnknownTarget(target.to_string()))?;
+            .ok_or_else(|| ImageError::UnknownTarget(target.to_string()))?;
         Vcs::reset(&mut self.commits, &commit)?;
         self.commit_store.save(&self.commits)?;
         Ok(hash)
     }
 
     /// Create a branch at the current HEAD.
-    pub fn branch_create(&mut self, name: &str) -> Result<(), WorkspaceError> {
+    pub fn branch_create(&mut self, name: &str) -> Result<(), ImageError> {
         Vcs::branch_create(&mut self.commits, name)?;
         self.commit_store.save(&self.commits)?;
         Ok(())
     }
 
     /// Delete a branch (not the one HEAD is on).
-    pub fn branch_delete(&mut self, name: &str) -> Result<(), WorkspaceError> {
+    pub fn branch_delete(&mut self, name: &str) -> Result<(), ImageError> {
         Vcs::branch_delete(&mut self.commits, name)?;
         self.commit_store.save(&self.commits)?;
         Ok(())
@@ -288,7 +301,7 @@ impl<'a> Workspace<'a> {
     /// Rebase branch `target` onto branch `newbase` (pointer surgery
     /// only; no hash recomputation, no layer renames). Preconditions: no
     /// running container, clean upper.
-    pub fn rebase(&mut self, newbase: &str, target: &str) -> Result<(), WorkspaceError> {
+    pub fn rebase(&mut self, newbase: &str, target: &str) -> Result<(), ImageError> {
         self.ensure_not_running()?;
         self.ensure_clean()?;
         Vcs::rebase(&mut self.commits, newbase, target)?;
@@ -296,9 +309,15 @@ impl<'a> Workspace<'a> {
         Ok(())
     }
 
+    /// `orca merge` is reserved but not implemented; always returns
+    /// [`VcsError::MergeUnimplemented`] (which points at rebase).
+    pub fn merge(&self, _branch: &str) -> Result<(), ImageError> {
+        Err(VcsError::MergeUnimplemented.into())
+    }
+
     /// Discard the upper: remove `diff/` and recreate it empty.
     /// Precondition: no running container.
-    pub fn clean(&mut self) -> Result<(), WorkspaceError> {
+    pub fn clean(&mut self) -> Result<(), ImageError> {
         self.ensure_not_running()?;
         let path = self.env.upper_path();
         std::fs::remove_dir_all(&path)?;
@@ -309,7 +328,7 @@ impl<'a> Workspace<'a> {
     /// Garbage-collect: drop commits unreachable from any branch or HEAD
     /// and delete their layers. Precondition: no running container.
     /// Returns the deleted layer hashes.
-    pub fn gc(&mut self) -> Result<Vec<Hash>, WorkspaceError> {
+    pub fn gc(&mut self) -> Result<Vec<Hash>, ImageError> {
         self.ensure_not_running()?;
         let (cleaned, dead_layers) = Vcs::gc(std::mem::take(&mut self.commits));
         self.commits = cleaned;
@@ -335,16 +354,16 @@ impl<'a> Workspace<'a> {
         &self,
         a: Option<&str>,
         b: Option<&str>,
-    ) -> Result<Vec<Change>, WorkspaceError> {
-        let image = self.image()?;
+    ) -> Result<Vec<Change>, ImageError> {
+        let material = self.container_image()?;
         match (a, b) {
             (None, _) => {
                 let new = vec![Layer::new(self.env.upper_path())];
-                Ok(changes(&new, &image.baseline(), self.blacklist())?)
+                Ok(changes(&new, &material.baseline(), self.blacklist())?)
             }
             (Some(a), None) => {
                 let new = self.stack_of(self.resolve_target_commit(a)?)?;
-                Ok(changes(&new, &image.base_only(), self.blacklist())?)
+                Ok(changes(&new, &material.base_only(), self.blacklist())?)
             }
             (Some(a), Some(b)) => {
                 let new = self.stack_of(self.resolve_target_commit(a)?)?;
@@ -355,7 +374,7 @@ impl<'a> Workspace<'a> {
     }
 
     /// Resolve a diff target that may be a branch name, commit or ROOT.
-    fn resolve_target_commit(&self, target: &str) -> Result<Hash, WorkspaceError> {
+    fn resolve_target_commit(&self, target: &str) -> Result<Hash, ImageError> {
         if let Some(branch) = self.commits.branch(target) {
             return Ok(*branch.commit_hash());
         }
@@ -364,29 +383,19 @@ impl<'a> Workspace<'a> {
 
     // ----- apply -------------------------------------------------------
 
-    /// Whether an unfinished apply journal exists.
-    pub fn apply_pending(&self) -> bool {
-        apply::has_pending(&self.env.apply_journal_path())
-    }
-
-    /// Compute (and optionally execute) the host application of this
-    /// environment's changes. Host-based only.
+    /// Plan the host application of this image's changes (host-based
+    /// only): compute the change list against the host base and freeze
+    /// it into an [`ApplyPlan`].
     ///
-    /// `no_upper` excludes uncommitted changes; `dry_run` only computes;
-    /// otherwise the changes are executed under the journal in
-    /// `apply-journal/`. The confirmation prompt lives in the CLI —
-    /// `force` merely asserts it already happened.
-    pub fn apply(
-        &self,
-        no_upper: bool,
-        force: bool,
-        dry_run: bool,
-    ) -> Result<Vec<Change>, WorkspaceError> {
+    /// `no_upper` excludes uncommitted changes. Fails with
+    /// [`ImageError::ApplyPending`] if an unfinished journal exists —
+    /// resolve it via [`Image::pending_apply`] first.
+    pub fn plan_apply(&self, no_upper: bool) -> Result<ApplyPlan<'a>, ImageError> {
         if !matches!(self.env.base_ref, BaseImageRef::Host) {
-            return Err(WorkspaceError::HostOnly);
+            return Err(ImageError::HostOnly);
         }
-        if self.apply_pending() {
-            return Err(WorkspaceError::ApplyPending);
+        if apply::has_pending(&self.env.apply_journal_path()) {
+            return Err(ImageError::ApplyPending);
         }
         let head = self.commits.head().commit_hash();
         let mut new = Vec::new();
@@ -395,28 +404,78 @@ impl<'a> Workspace<'a> {
         }
         new.extend(self.stack_of(head)?);
         let base = vec![Layer::new(std::path::PathBuf::from("/"))];
-        let list = changes(&new, &base, self.blacklist())?;
-        if dry_run || !force {
-            return Ok(list);
-        }
-        self.ensure_not_running()?;
-        apply::execute(&list, &self.env.apply_journal_path())?;
-        Ok(list)
+        let changes = changes(&new, &base, self.blacklist())?;
+        Ok(ApplyPlan {
+            env: self.env,
+            changes,
+        })
     }
 
-    /// Roll back an unfinished apply journal.
-    pub fn apply_rollback(&self) -> Result<(), WorkspaceError> {
+    /// The unfinished apply journal left by a crash or interrupt, if any
+    /// (with its manifest loaded for display before recovery).
+    pub fn pending_apply(&self) -> Result<Option<ApplyRecovery<'a>>, ImageError> {
+        if !apply::has_pending(&self.env.apply_journal_path()) {
+            return Ok(None);
+        }
+        let changes = apply::load_manifest(&self.env.apply_journal_path())?;
+        Ok(Some(ApplyRecovery {
+            env: self.env,
+            changes,
+        }))
+    }
+}
+
+/// A frozen, displayable plan for applying an [`Image`]'s changes to the
+/// host: what the user confirms is exactly what gets executed.
+pub struct ApplyPlan<'a> {
+    env: &'a Env,
+    changes: Vec<Change>,
+}
+
+impl ApplyPlan<'_> {
+    /// The changes this plan would apply (for display / confirmation).
+    pub fn changes(&self) -> &[Change] {
+        &self.changes
+    }
+
+    /// Execute the plan under the journal in `apply-journal/`.
+    ///
+    /// Consumes the plan (the confirmed plan is the executed one).
+    /// Requires root and no running container. The confirmation prompt
+    /// lives in the CLI — calling this asserts it already happened.
+    pub fn execute(self) -> Result<(), ImageError> {
+        if !nix::unistd::geteuid().is_root() {
+            return Err(ImageError::RootRequired);
+        }
+        if let Some(pid) = LockFile::check(&self.env.lock_path())? {
+            return Err(ImageError::Running(pid));
+        }
+        apply::execute(&self.changes, &self.env.apply_journal_path())?;
+        Ok(())
+    }
+}
+
+/// An unfinished apply journal (crash / interrupt), ready for recovery.
+pub struct ApplyRecovery<'a> {
+    env: &'a Env,
+    changes: Vec<Change>,
+}
+
+impl ApplyRecovery<'_> {
+    /// The journal's manifest: the changes the interrupted apply was
+    /// executing.
+    pub fn changes(&self) -> &[Change] {
+        &self.changes
+    }
+
+    /// Undo the partial apply from the journal's backups.
+    pub fn rollback(self) -> Result<(), ImageError> {
         Ok(apply::rollback(&self.env.apply_journal_path())?)
     }
 
-    /// Resume an unfinished apply journal.
-    pub fn apply_resume(&self) -> Result<(), WorkspaceError> {
+    /// Re-execute the journal to completion.
+    pub fn resume(self) -> Result<(), ImageError> {
         Ok(apply::resume(&self.env.apply_journal_path())?)
-    }
-
-    /// The pending journal's manifest (for display before recovery).
-    pub fn apply_pending_manifest(&self) -> Result<Vec<Change>, WorkspaceError> {
-        Ok(apply::load_manifest(&self.env.apply_journal_path())?)
     }
 }
 
@@ -436,18 +495,11 @@ mod tests {
     use crate::env::EnvStore;
     use std::path::Path;
 
-    /// Build a store + host env in a temp dir and write the initial
-    /// commit graph, mimicking `orca init`.
+    /// Build a store + host env in a temp dir, mimicking `orca init`
+    /// (`create` writes the initial commit graph itself).
     fn setup(dir: &Path) -> (EnvStore, uuid::Uuid) {
-        let mut store = EnvStore::load(&dir.join("envs")).unwrap();
-        let uuid = {
-            let env = store.create("t".into(), BaseImageRef::Host).unwrap();
-            let commits_file = env.env_path().join(COMMIT_FILE_NAME);
-            CommitStore::new(&commits_file)
-                .save(&CommitsData::new())
-                .unwrap();
-            env.uuid
-        };
+        let mut store = EnvStore::load(dir).unwrap();
+        let uuid = store.create("t".into(), BaseImageRef::Host).unwrap().uuid;
         store.save().unwrap();
         (store, uuid)
     }
@@ -465,8 +517,8 @@ mod tests {
         let env = store.find_by_id(&uuid).unwrap();
         write_upper(env, "etc/foo", b"1");
 
-        let mut ws = Workspace::open(env).unwrap();
-        let hash = ws.commit("add foo").unwrap();
+        let mut image = env.image().unwrap();
+        let hash = image.commit("add foo").unwrap();
         // diff/ is empty again; the layer holds the file.
         assert!(std::fs::read_dir(env.upper_path()).unwrap().next().is_none());
         assert!(
@@ -475,8 +527,8 @@ mod tests {
                 .join("etc/foo")
                 .is_file()
         );
-        assert_eq!(ws.log().len(), 2);
-        assert_eq!(ws.log()[0].message(), "add foo");
+        assert_eq!(image.log().len(), 2);
+        assert_eq!(image.log()[0].message(), "add foo");
     }
 
     #[test]
@@ -484,20 +536,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (store, uuid) = setup(dir.path());
         let env = store.find_by_id(&uuid).unwrap();
-        let mut ws = Workspace::open(env).unwrap();
-        ws.commit("c1").unwrap();
+        let mut image = env.image().unwrap();
+        image.commit("c1").unwrap();
 
         write_upper(env, "dirty", b"x");
         assert!(matches!(
-            ws.checkout("ROOT"),
-            Err(WorkspaceError::NotClean)
+            image.checkout("ROOT"),
+            Err(ImageError::NotClean)
         ));
-        ws.clean().unwrap();
-        let head = ws.checkout("ROOT").unwrap();
+        image.clean().unwrap();
+        let head = image.checkout("ROOT").unwrap();
         assert!(matches!(head, Head::Detached(_)));
         // Back to a branch.
-        ws.checkout("main").unwrap();
-        assert_eq!(ws.data().head().branch_name(), Some("main"));
+        image.checkout("main").unwrap();
+        assert_eq!(image.data().head().branch_name(), Some("main"));
     }
 
     #[test]
@@ -505,16 +557,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (store, uuid) = setup(dir.path());
         let env = store.find_by_id(&uuid).unwrap();
-        let mut ws = Workspace::open(env).unwrap();
+        let mut image = env.image().unwrap();
         write_upper(env, "a", b"1");
-        let first = ws.commit("first").unwrap();
+        let first = image.commit("first").unwrap();
         write_upper(env, "b", b"2");
-        let second = ws.commit("second").unwrap();
+        let second = image.commit("second").unwrap();
 
-        ws.reset(&to_hex(&first)[..12]).unwrap();
-        assert_eq!(ws.data().head().commit_hash(), first);
+        image.reset(&to_hex(&first)[..12]).unwrap();
+        assert_eq!(image.data().head().commit_hash(), first);
 
-        let dead = ws.gc().unwrap();
+        let dead = image.gc().unwrap();
         assert_eq!(dead, vec![second]);
         assert!(!env.layers_path().join(to_hex(&second)).exists());
         assert!(env.layers_path().join(to_hex(&first)).exists());
@@ -527,14 +579,14 @@ mod tests {
         let env = store.find_by_id(&uuid).unwrap();
         let lock = LockFile::acquire(&env.lock_path()).unwrap();
 
-        let mut ws = Workspace::open(env).unwrap();
+        let mut image = env.image().unwrap();
         assert!(matches!(
-            ws.commit("x"),
-            Err(WorkspaceError::Running(_))
+            image.commit("x"),
+            Err(ImageError::Running(_))
         ));
-        assert!(matches!(ws.clean(), Err(WorkspaceError::Running(_))));
+        assert!(matches!(image.clean(), Err(ImageError::Running(_))));
         lock.release().unwrap();
-        ws.commit("x").unwrap();
+        image.commit("x").unwrap();
     }
 
     /// Build a *guest* env whose base is a fabricated image with one
@@ -546,7 +598,7 @@ mod tests {
 
         let digest = ImageDigest([9; 32]);
         let layer = LayerDigest([8; 32]);
-        let mut store = EnvStore::load(&dir.join("envs")).unwrap();
+        let mut store = EnvStore::load(dir).unwrap();
         let uuid = {
             let env = store
                 .create(
@@ -556,25 +608,22 @@ mod tests {
                     },
                 )
                 .unwrap();
-            let commits_file = env.env_path().join(COMMIT_FILE_NAME);
-            CommitStore::new(&commits_file)
-                .save(&CommitsData::new())
+            let images = env.external_images();
+            std::fs::create_dir_all(images.blobs_dir().join(layer.to_string())).unwrap();
+            images
+                .insert(ImageManifest {
+                    digest,
+                    registry: "docker.io".into(),
+                    repository: "library/fake".into(),
+                    tag: "1".into(),
+                    layer_digests: vec![layer],
+                    entrypoint: vec![],
+                    cmd: vec![],
+                    env: vec![],
+                    working_dir: "/".into(),
+                    pulled_at: chrono::Utc::now(),
+                })
                 .unwrap();
-            std::fs::create_dir_all(env.blob_store_path().join(layer.to_string())).unwrap();
-            let mut index = ImageIndex::load(&env.images_path().join(IMAGE_FILE_NAME)).unwrap();
-            index.insert(ImageManifest {
-                digest,
-                registry: "docker.io".into(),
-                repository: "library/fake".into(),
-                tag: "1".into(),
-                layer_digests: vec![layer],
-                entrypoint: vec![],
-                cmd: vec![],
-                env: vec![],
-                working_dir: "/".into(),
-                pulled_at: chrono::Utc::now(),
-            });
-            index.save().unwrap();
             env.uuid
         };
         store.save().unwrap();
@@ -586,15 +635,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (store, uuid) = setup_guest(dir.path());
         let env = store.find_by_id(&uuid).unwrap();
-        let mut ws = Workspace::open(env).unwrap();
+        let mut image = env.image().unwrap();
 
         // Commit a layer, then add an uncommitted file.
         write_upper(env, "committed", b"1");
-        ws.commit("c1").unwrap();
+        image.commit("c1").unwrap();
         write_upper(env, "uncommitted", b"2");
 
-        let ws = Workspace::open(env).unwrap();
-        let list = ws.diff(None, None).unwrap();
+        let image = env.image().unwrap();
+        let list = image.diff(None, None).unwrap();
         // The committed file is part of the baseline (lower layer), so
         // only the uncommitted upper content is reported.
         assert_eq!(
@@ -616,13 +665,13 @@ mod tests {
         let mut text = std::fs::read_to_string(&file).unwrap();
         text.push_str("\n[defaults]\nblacklist = [\"*.secret\"]\n");
         std::fs::write(&file, &text).unwrap();
-        let store = EnvStore::load(&dir.path().join("envs")).unwrap();
+        let store = EnvStore::load(dir.path()).unwrap();
         let env = store.find_by_id(&uuid).unwrap();
 
         write_upper(env, "keep.txt", b"1");
         write_upper(env, "x.secret", b"2");
-        let ws = Workspace::open(env).unwrap();
-        let list = ws.diff(None, None).unwrap();
+        let image = env.image().unwrap();
+        let list = image.diff(None, None).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].path(), Path::new("keep.txt"));
     }
@@ -639,14 +688,10 @@ mod tests {
                 },
             )
             .unwrap();
-        let commits_file = guest.env_path().join(COMMIT_FILE_NAME);
-        CommitStore::new(&commits_file)
-            .save(&CommitsData::new())
-            .unwrap();
-        let ws = Workspace::open(guest).unwrap();
+        let image = guest.image().unwrap();
         assert!(matches!(
-            ws.apply(false, false, true),
-            Err(WorkspaceError::HostOnly)
+            image.plan_apply(false),
+            Err(ImageError::HostOnly)
         ));
     }
 }

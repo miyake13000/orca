@@ -2,7 +2,7 @@
 //!
 //! One lock file per environment (`run/<uuid>/lock`) containing the
 //! holder's PID. `orca run` *acquires* it for the container's lifetime;
-//! workspace operations only *check* that no live lock exists. A lock
+//! Image operations only *check* that no live lock exists. A lock
 //! whose PID is dead is stale: `check` cleans it up (lock file plus the
 //! leftover `session/` directory — mounts died with the child's namespace,
 //! so directories are all that is left) and reports the slot free.
@@ -62,7 +62,7 @@ impl LockFile {
         }
     }
 
-    /// Check the lock without acquiring it (used by workspace operations).
+    /// Check the lock without acquiring it (used by Image operations).
     ///
     /// Returns `Some(pid)` if a live process holds it, `None` if free.
     /// A stale lock (dead PID or unparsable content) is cleaned up along

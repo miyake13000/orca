@@ -1,24 +1,59 @@
-//! `orca run`: resolve the execution spec, take the run lock, start the
-//! container, and propagate its exit code.
+//! `orca run` policy: resolve the execution spec, take the run lock,
+//! start the container, and propagate its exit code.
+//!
+//! Public entry: [`crate::Image::run`], which assembles the
+//! [`ContainerImage`] and delegates here.
 
 use std::io::IsTerminal;
 
-use orca::{Env, ExecSpec, Invocation, LockFile, Workspace, resolve_run_target};
-use orca_container::{ContainerBuilder, IoMode, SessionPaths};
-use orca_image::BaseImageRef;
+use orca_container::{ContainerBuilder, ContainerError, IoMode, SessionPaths};
+use orca_image::{BaseImageRef, ContainerImage};
 
-/// Namespace / identity flags and command from the CLI.
+use crate::env::Env;
+use crate::exec_spec::{ExecSpec, ExecSpecError, Invocation, resolve_run_target};
+use crate::image::ImageError;
+use crate::lock::{LockError, LockFile};
+
+/// Namespace / identity flags and command for a run.
 pub struct RunOpts {
+    /// Share the host PID namespace.
     pub no_pid: bool,
+    /// Share the host UTS namespace.
     pub no_uts: bool,
+    /// Share the host IPC namespace.
     pub no_ipc: bool,
+    /// Isolate the network namespace (shared with the host by default).
     pub network: bool,
+    /// Run as this user inside the container (uid or name).
     pub user: Option<String>,
+    /// Run with this group inside the container (gid or name).
     pub group: Option<String>,
+    /// Command and arguments (empty = the resolved default command).
     pub cmd: Vec<String>,
 }
 
-/// Run a container in `env`. Returns the child's exit code.
+/// Errors from running a container.
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    /// Mounting and pivoting need an effective uid of 0.
+    #[error("orca run requires root (try sudo, or a setuid-root install)")]
+    RootRequired,
+    /// The mount material could not be assembled.
+    #[error(transparent)]
+    Image(#[from] ImageError),
+    /// The execution spec could not be resolved.
+    #[error(transparent)]
+    ExecSpec(#[from] ExecSpecError),
+    /// The run lock could not be acquired or released.
+    #[error(transparent)]
+    Lock(#[from] LockError),
+    /// The container failed to start, run, or be awaited.
+    #[error(transparent)]
+    Container(#[from] ContainerError),
+}
+
+/// Run a container in `env` from the assembled `material`. Returns the
+/// child's exit code.
 ///
 /// Lock lifecycle (DESIGN §5): acquired here before `Container::run`,
 /// held until after `wait()`, released explicitly. Stale locks are
@@ -26,13 +61,14 @@ pub struct RunOpts {
 ///
 /// Policy resolution happens here (`Invocation` capture → run target →
 /// `ExecSpec`); the container receives only resolved values.
-pub fn run(env: &Env, opts: RunOpts) -> anyhow::Result<i32> {
+pub(crate) fn run(
+    env: &Env,
+    material: ContainerImage,
+    opts: RunOpts,
+) -> Result<i32, RunError> {
     if !nix::unistd::geteuid().is_root() {
-        anyhow::bail!("orca run requires root (try sudo, or a setuid-root install)");
+        return Err(RunError::RootRequired);
     }
-
-    // Assemble the image material (committed stack + base + config).
-    let image = Workspace::open(env)?.image()?;
 
     // Decide the IO mode once, before any terminal syscalls.
     let io = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
@@ -51,7 +87,7 @@ pub fn run(env: &Env, opts: RunOpts) -> anyhow::Result<i32> {
     let user_cmd = (!opts.cmd.is_empty()).then_some(opts.cmd);
     let spec = ExecSpec::resolve(
         matches!(env.base_ref, BaseImageRef::Host),
-        &image.config,
+        &material.config,
         env.settings(),
         &invocation,
         target.as_ref(),
@@ -72,7 +108,7 @@ pub fn run(env: &Env, opts: RunOpts) -> anyhow::Result<i32> {
     // container's whole lifetime.
     let lock = LockFile::acquire(&env.lock_path())?;
 
-    let mut builder = ContainerBuilder::new(image, session)
+    let mut builder = ContainerBuilder::new(material, session)
         .io(io)
         .unshare_pid(!opts.no_pid)
         .unshare_uts(!opts.no_uts)

@@ -1,7 +1,7 @@
 //! `orca apply`: confirmation flow and journal recovery around
-//! `Workspace::apply`.
+//! `Image::plan_apply` / `ApplyPlan::execute`.
 
-use orca::{EnvStore, Workspace, is_setuid_source};
+use orca::{ApplyRecovery, EnvStore, is_setuid_source};
 
 use super::{confirm, format_change, select_env};
 
@@ -14,24 +14,21 @@ pub fn apply(
     yes: bool,
 ) -> anyhow::Result<()> {
     let env = select_env(store, cli_env)?;
-    if !nix::unistd::geteuid().is_root() {
-        anyhow::bail!("orca apply requires root (try sudo)");
-    }
-    let ws = Workspace::open(env)?;
+    let image = env.image()?;
 
     // Unfinished journal from a crash/interrupt: offer recovery first.
-    if ws.apply_pending() {
-        return recover(&ws);
+    if let Some(recovery) = image.pending_apply()? {
+        return recover(recovery);
     }
 
-    // Compute and show what would change.
-    let changes = ws.apply(no_upper, false, true)?;
-    if changes.is_empty() {
+    // Freeze the plan and show it; what is confirmed is what runs.
+    let plan = image.plan_apply(no_upper)?;
+    if plan.changes().is_empty() {
         println!("nothing to apply");
         return Ok(());
     }
     let mut setuid = 0usize;
-    for change in &changes {
+    for change in plan.changes() {
         let mark = if is_setuid_source(change) {
             setuid += 1;
             "  [setuid/setgid]"
@@ -40,7 +37,7 @@ pub fn apply(
         };
         println!("{}{mark}", format_change(change));
     }
-    println!("{} change(s) to apply to the host", changes.len());
+    println!("{} change(s) to apply to the host", plan.changes().len());
     if setuid > 0 {
         println!("warning: {setuid} change(s) install setuid/setgid files");
     }
@@ -51,18 +48,18 @@ pub fn apply(
         println!("aborted");
         return Ok(());
     }
-    ws.apply(no_upper, true, false)?;
-    println!("applied {} change(s)", changes.len());
+    let count = plan.changes().len();
+    plan.execute()?;
+    println!("applied {count} change(s)");
     Ok(())
 }
 
 /// Interactive recovery for a leftover apply journal.
-fn recover(ws: &Workspace<'_>) -> anyhow::Result<()> {
+fn recover(recovery: ApplyRecovery<'_>) -> anyhow::Result<()> {
     use std::io::Write;
-    let pending = ws.apply_pending_manifest()?;
     println!(
         "an unfinished apply journal with {} change(s) was found (crash or interrupt)",
-        pending.len()
+        recovery.changes().len()
     );
     print!("[r]ollback the partial apply, [c]ontinue it, or [a]bort? ");
     std::io::stdout().flush()?;
@@ -70,11 +67,11 @@ fn recover(ws: &Workspace<'_>) -> anyhow::Result<()> {
     std::io::stdin().read_line(&mut line)?;
     match line.trim().to_ascii_lowercase().as_str() {
         "r" | "rollback" => {
-            ws.apply_rollback()?;
+            recovery.rollback()?;
             println!("rolled back; re-run `orca apply` to start over");
         }
         "c" | "continue" => {
-            ws.apply_resume()?;
+            recovery.resume()?;
             println!("apply completed");
         }
         _ => println!("aborted; the journal is kept"),

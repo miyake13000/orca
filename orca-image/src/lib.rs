@@ -7,7 +7,7 @@
 //! - [`LayerStore`] — `envs/<uuid>/layers/` (committed layers).
 //! - [`changes`] / [`Change`] — read-only diff of layer stacks, used by
 //!   `orca diff` and `orca apply`.
-//! - [`Image`] / [`Base`] / [`ImageConfig`] — the material a container runs
+//! - [`ContainerImage`] / [`Base`] / [`ImageConfig`] — the material a container runs
 //!   from. Mounting it is *not* this crate's concern (the `OverlayMount`
 //!   trait lives in `orca-container`).
 //! - [`external_image`] — pulled OCI images: image index, blob CAS
@@ -28,7 +28,7 @@ mod store;
 pub(crate) mod whiteout;
 
 pub use diff::{Blacklist, Change, DiffError, changes};
-pub use image::{Base, Image, ImageConfig};
+pub use image::{Base, ContainerImage, ImageConfig};
 pub use layer::{Layer, Upper};
 pub use store::{LayerStore, LayerStoreError};
 

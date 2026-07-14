@@ -389,7 +389,7 @@ mod tests {
     /// Drive execute() against a fake "host" by using relative paths...
     /// not possible: apply targets absolute "/". Instead we test the
     /// journal helpers and copy_preserving; end-to-end apply is covered
-    /// by the root-only integration test in the workspace crate.
+    /// by the root-only integration test in the orca crate.
     #[test]
     fn copy_preserving_roundtrip() {
         let dir = tempfile::tempdir().unwrap();

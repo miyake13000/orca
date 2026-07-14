@@ -185,8 +185,8 @@ fn main() {
 /// Dispatch to the command handlers. Returns the process exit code
 /// (`orca run` propagates the container's).
 fn run(cli: Cli) -> anyhow::Result<i32> {
-    let root = orca::orca_root();
-    let mut store = orca::EnvStore::load(&root.join("envs"))?;
+    let orca = orca::Orca::new(orca::orca_root());
+    let mut store = orca.envs()?;
 
     match cli.command {
         Command::Init {
@@ -194,7 +194,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             host: _,
             image,
             keep,
-        } => cli::env_cmd::init(&mut store, name, image, keep),
+        } => cli::env_cmd::init(&orca, &mut store, name, image, keep),
         Command::Use { target } => cli::env_cmd::use_env(&mut store, &target),
         Command::Ls => cli::env_cmd::ls(&store),
         Command::Rm { target, yes } => cli::env_cmd::rm(&mut store, &target, yes),
@@ -209,18 +209,15 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             cmd,
         } => {
             let env = cli::select_env(&store, &cli.env)?;
-            return cli::run::run(
-                env,
-                cli::run::RunOpts {
-                    no_pid,
-                    no_uts,
-                    no_ipc,
-                    network,
-                    user,
-                    group,
-                    cmd,
-                },
-            );
+            return Ok(env.image()?.run(orca::RunOpts {
+                no_pid,
+                no_uts,
+                no_ipc,
+                network,
+                user,
+                group,
+                cmd,
+            })?);
         }
         Command::Commit { message } => cli::vcs_cmd::commit(&store, &cli.env, &message),
         Command::Diff { a, b } => cli::vcs_cmd::diff(&store, &cli.env, a.as_deref(), b.as_deref()),
@@ -243,9 +240,9 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             yes,
         } => cli::apply_cmd::apply(&store, &cli.env, no_upper, dry_run, yes),
         Command::Image { command } => match command {
-            ImageCommand::Pull { reference } => cli::image_cmd::pull(&root, &reference),
-            ImageCommand::Ls => cli::image_cmd::ls(&root),
-            ImageCommand::Rm { reference } => cli::image_cmd::rm(&root, &reference),
+            ImageCommand::Pull { reference } => cli::image_cmd::pull(&orca, &reference),
+            ImageCommand::Ls => cli::image_cmd::ls(&orca),
+            ImageCommand::Rm { reference } => cli::image_cmd::rm(&orca, &reference),
         },
     }?;
     Ok(0)

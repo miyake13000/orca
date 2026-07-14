@@ -1,6 +1,6 @@
 //! OverlayFS container runtime for orca.
 //!
-//! This crate is pure mechanism: it mounts an [`orca_image::Image`] as an
+//! This crate is pure mechanism: it mounts an [`orca_image::ContainerImage`] as an
 //! overlay rootfs inside a new mount namespace, `pivot_root`s into it and
 //! executes a command, optionally wired to the calling terminal through a
 //! PTY. Policy — which environment to run, locking, committing — lives in

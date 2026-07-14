@@ -1,13 +1,13 @@
-//! [`OverlayMount`]: gives `orca_image::Image` the ability to mount itself.
+//! [`OverlayMount`]: gives `orca_image::ContainerImage` the ability to mount itself.
 //!
 //! Overlay mounting happens inside the child's mount namespace, which is a
-//! container concern — so the trait *and* its impl for `Image` live here
-//! (orphan rule: the trait is local). `Image` itself stays mount-agnostic
+//! container concern — so the trait *and* its impl for `ContainerImage` live here
+//! (orphan rule: the trait is local). `ContainerImage` itself stays mount-agnostic
 //! in `orca-image`.
 
 use std::path::PathBuf;
 
-use orca_image::{Base, Image};
+use orca_image::{Base, ContainerImage};
 
 use crate::mount::{MountError, mount_fake_rootfs, overlay_mount};
 
@@ -45,7 +45,7 @@ pub trait OverlayMount {
     fn mount(&self, session: &SessionPaths) -> Result<Rootfs, MountError>;
 }
 
-impl OverlayMount for Image {
+impl OverlayMount for ContainerImage {
     /// Translate `base` into the bottom lower layers — the only place
     /// Host/Guest branch — then mount the main overlay:
     /// `lowerdir = committed layers (newest first) : base`, upper =
