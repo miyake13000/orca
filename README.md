@@ -61,7 +61,7 @@ wget https://github.com/miyake13000/orca/releases/latest/download/orca
 ### Global Options
 
 ```
-orca [--env <name-or-uuid>] <command> [args]
+orca [--env|-e <name-or-uuid>] <command> [args]
 ```
 
 The target environment is resolved in this order:
@@ -78,11 +78,11 @@ The target environment is resolved in this order:
 |---|---|
 | `orca init <name>` | Create a new environment from host rootfs (default) |
 | `orca init <name> --host` | Explicitly use host rootfs as base |
-| `orca init <name> --image ubuntu:24.04` | Use a Docker image as base |
-| `orca init <name> --keep` | Create without switching current environment |
+| `orca init <name> --image\|-i ubuntu:24.04` | Use a Docker image as base |
+| `orca init <name> --keep\|-k` | Create without switching current environment |
 | `orca use <name-or-uuid>` | Switch the current environment |
 | `orca ls` | List all environments |
-| `orca rm <name-or-uuid>` | Delete an environment entirely (asks for confirmation; `--yes` to skip) |
+| `orca rm <name-or-uuid>` | Delete an environment entirely (asks for confirmation; `--yes|-y` to skip) |
 | `orca clean` | Discard uncommitted changes (destroy upper layer) |
 
 ### Running
@@ -92,9 +92,9 @@ The target environment is resolved in this order:
 | `orca run` | Enter the container (resumes from last state if uncommitted changes exist) |
 | `orca run <cmd> [args]` | Run a specific command inside the container |
 | `orca run --no-pid` / `--no-uts` / `--no-ipc` | Disable PID / UTS / IPC namespace isolation |
-| `orca run --network` | Isolate the network namespace (shared with host by default) |
-| `orca run --user <uid\|name>` | Run as this user inside the container |
-| `orca run --group <gid\|name>` | Run with this group inside the container |
+| `orca run --network\|-n` | Isolate the network namespace (shared with host by default) |
+| `orca run --user\|-u <uid\|name>` | Run as this user inside the container |
+| `orca run --group\|-g <gid\|name>` | Run with this group inside the container |
 
 ### Version Control
 
@@ -122,8 +122,8 @@ The target environment is resolved in this order:
 |---|---|
 | `orca apply` | Apply all committed changes + uncommitted changes to host |
 | `orca apply --no-upper` | Apply committed changes only (exclude uncommitted changes) |
-| `orca apply --dry-run` | Show changes without applying |
-| `orca apply --yes` | Skip confirmation prompt |
+| `orca apply --dry-run\|-n` | Show changes without applying |
+| `orca apply --yes\|-y` | Skip confirmation prompt |
 
 > Only available for host-based containers. Docker image-based containers will error.
 

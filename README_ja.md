@@ -63,7 +63,7 @@ wget https://github.com/miyake13000/orca/releases/latest/download/orca
 ### グローバルオプション
 
 ```
-orca [--env <name-or-uuid>] <command> [args]
+orca [--env|-e <name-or-uuid>] <command> [args]
 ```
 
 対象の環境は次の優先順位で決まる:
@@ -80,11 +80,11 @@ orca [--env <name-or-uuid>] <command> [args]
 |---|---|
 | `orca init <name>` | ホスト rootfs から新しい環境を作成 (デフォルト) |
 | `orca init <name> --host` | ホスト rootfs をベースにすることを明示 |
-| `orca init <name> --image ubuntu:24.04` | Docker イメージをベースに作成 |
-| `orca init <name> --keep` | カレント環境を切り替えずに作成 |
+| `orca init <name> --image\|-i ubuntu:24.04` | Docker イメージをベースに作成 |
+| `orca init <name> --keep\|-k` | カレント環境を切り替えずに作成 |
 | `orca use <name-or-uuid>` | カレント環境を切り替え |
 | `orca ls` | 環境の一覧を表示 |
-| `orca rm <name-or-uuid>` | 環境を完全に削除 (確認プロンプトあり，`--yes` でスキップ) |
+| `orca rm <name-or-uuid>` | 環境を完全に削除 (確認プロンプトあり，`--yes|-y` でスキップ) |
 | `orca clean` | 未コミットの変更を破棄 (upper レイヤを破壊) |
 
 ### 実行
@@ -94,9 +94,9 @@ orca [--env <name-or-uuid>] <command> [args]
 | `orca run` | コンテナに入る (未コミットの変更があれば前回の状態から再開) |
 | `orca run <cmd> [args]` | コンテナ内で指定したコマンドを実行 |
 | `orca run --no-pid` / `--no-uts` / `--no-ipc` | PID / UTS / IPC namespace の分離を無効化 |
-| `orca run --network` | network namespace を分離 (デフォルトはホストと共有) |
-| `orca run --user <uid\|name>` | コンテナ内の実行ユーザを指定 |
-| `orca run --group <gid\|name>` | コンテナ内の実行グループを指定 |
+| `orca run --network\|-n` | network namespace を分離 (デフォルトはホストと共有) |
+| `orca run --user\|-u <uid\|name>` | コンテナ内の実行ユーザを指定 |
+| `orca run --group\|-g <gid\|name>` | コンテナ内の実行グループを指定 |
 
 ### バージョン管理
 
@@ -124,8 +124,8 @@ orca [--env <name-or-uuid>] <command> [args]
 |---|---|
 | `orca apply` | コミット済み + 未コミットの全変更をホストに適用 |
 | `orca apply --no-upper` | コミット済みの変更のみ適用 (未コミット分を除外) |
-| `orca apply --dry-run` | 適用せずに変更内容だけ表示 |
-| `orca apply --yes` | 確認プロンプトをスキップ |
+| `orca apply --dry-run\|-n` | 適用せずに変更内容だけ表示 |
+| `orca apply --yes\|-y` | 確認プロンプトをスキップ |
 
 > ホストベースのコンテナ専用．Docker イメージベースのコンテナではエラーになる．
 

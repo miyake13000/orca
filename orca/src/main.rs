@@ -15,7 +15,7 @@ mod cli;
 struct Cli {
     /// Target environment (name or uuid); overrides ORCA_ENV and the
     /// current environment.
-    #[arg(long, global = true)]
+    #[arg(long, short = 'e', global = true)]
     env: Option<String>,
 
     #[command(subcommand)]
@@ -32,10 +32,10 @@ enum Command {
         #[arg(long, conflicts_with = "image")]
         host: bool,
         /// Use a Docker/OCI image as base (pulled automatically)
-        #[arg(long)]
+        #[arg(long, short = 'i')]
         image: Option<String>,
         /// Do not switch the current environment to the new one
-        #[arg(long)]
+        #[arg(long, short = 'k')]
         keep: bool,
     },
     /// Switch the current environment
@@ -67,15 +67,15 @@ enum Command {
         #[arg(long)]
         no_ipc: bool,
         /// Isolate the network namespace (shared with host by default)
-        #[arg(long)]
+        #[arg(long, short = 'n')]
         network: bool,
         /// Run as this user inside the container (uid or name).
         /// Default: the invoking user under a setuid install, root
         /// under sudo
-        #[arg(long)]
+        #[arg(long, short = 'u')]
         user: Option<String>,
         /// Run with this group inside the container (gid or name)
-        #[arg(long)]
+        #[arg(long, short = 'g')]
         group: Option<String>,
         /// Command and arguments (defaults to the image command)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -141,7 +141,7 @@ enum Command {
         #[arg(long)]
         no_upper: bool,
         /// Show what would change without applying
-        #[arg(long)]
+        #[arg(long, short = 'n')]
         dry_run: bool,
         /// Skip the confirmation prompt
         #[arg(long, short = 'y')]
