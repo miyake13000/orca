@@ -11,6 +11,9 @@ use orca_image::{Base, ContainerImage};
 
 use crate::mount::{MountError, mount_fake_rootfs, overlay_mount};
 
+const INIT_LAYER_DIR: &str = "init-layer";
+const RUNTIME_FILES_DIR: &str = "runtime-files";
+
 /// Runtime paths under `run/<uuid>/session/`, prepared by the `orca` crate
 /// and consumed by the container.
 ///
@@ -31,6 +34,16 @@ pub struct SessionPaths {
     pub fake_upper: PathBuf,
     /// Host-based only: stage-1 workdir (`session/fake_work`).
     pub fake_work: PathBuf,
+}
+
+impl SessionPaths {
+    pub(crate) fn init_layer(&self) -> PathBuf {
+        self.base.join(INIT_LAYER_DIR)
+    }
+
+    pub(crate) fn runtime_files(&self) -> PathBuf {
+        self.base.join(RUNTIME_FILES_DIR)
+    }
 }
 
 /// A mounted rootfs: the overlay mount point that `pivot_root` targets.
@@ -62,8 +75,14 @@ impl OverlayMount for ContainerImage {
             )?],
             Base::Guest(layers) => layers.iter().map(|l| l.path().to_path_buf()).collect(),
         };
-        let mut lowerdir: Vec<PathBuf> =
-            self.lower.iter().map(|l| l.path().to_path_buf()).collect();
+        let init_layer = session.init_layer();
+        let mut lowerdir = Vec::new();
+        // Container startup creates this directory. Preserve the existing
+        // behavior for callers that use Image::mount directly.
+        if init_layer.is_dir() {
+            lowerdir.push(init_layer);
+        }
+        lowerdir.extend(self.lower.iter().map(|l| l.path().to_path_buf()));
         lowerdir.extend(base_lowers);
         overlay_mount(&session.rootfs, &lowerdir, self.upper.path(), &session.work)?;
         Ok(Rootfs(session.rootfs.clone()))

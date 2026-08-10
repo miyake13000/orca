@@ -7,10 +7,10 @@
 //! status pipe and `_exit(1)`. `std::process::exit` is never used (no
 //! atexit / stdio double-flush after the fork-like clone).
 //!
-//! Init steps are split into *required* (overlay, pivot_root, /proc, /dev,
-//! devpts, PTY in tty mode — failure aborts) and *best-effort* (/sys,
-//! /dev/shm, /dev/mqueue, cgroup, device nodes, symlinks, resolv.conf,
-//! /dev/console — failure prints one warning and continues).
+//! Init steps are split into *required* (overlay, pivot_root, runtime-file
+//! binds, /proc, /dev, devpts, PTY in tty mode — failure aborts) and
+//! *best-effort* (/sys, /dev/shm, /dev/mqueue, cgroup, device nodes,
+//! symlinks, /dev/console — failure prints one warning and continues).
 
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, RawFd};
@@ -24,7 +24,9 @@ use crate::image::{OverlayMount, SessionPaths};
 use crate::mount::{self, PseudoMount};
 
 use super::tty::send_fd;
-use super::{IoMode, RunAs};
+use super::{ETC_RESOLV_CONF, IDENTITY_FILE_PATHS, IoMode, RunAs};
+
+const OLD_ROOT: &str = "/oldroot";
 
 /// Everything the child needs, borrowed from the parent's (copied)
 /// address space.
@@ -37,7 +39,6 @@ pub(crate) struct ChildConfig<'a> {
     pub cwd: &'a Path,
     pub run_as: Option<&'a RunAs>,
     pub hostname: Option<&'a str>,
-    pub set_hostname: bool,
     /// Write end of the CLOEXEC status pipe.
     pub status_fd: RawFd,
     /// Child end of the fd-passing socketpair (tty mode).
@@ -81,12 +82,12 @@ pub(crate) fn child_main(cfg: &ChildConfig<'_>) -> isize {
         Err(e) => fail(status, "overlay_mount", e.to_string()),
     };
 
-    // 3. Hostname (UTS namespace only).
-    if cfg.set_hostname {
-        let name = cfg.hostname.unwrap_or("orca");
-        if let Err(e) = nix::unistd::sethostname(name) {
-            warn("sethostname", e);
-        }
+    // 3. Optional hostname change (the parent only supplies it for a
+    //    private UTS namespace).
+    if let Some(name) = cfg.hostname
+        && let Err(e) = nix::unistd::sethostname(name)
+    {
+        warn("sethostname", e);
     }
 
     // 4. pivot_root into the overlay.
@@ -116,8 +117,11 @@ pub(crate) fn child_main(cfg: &ChildConfig<'_>) -> isize {
     // 6. Device nodes and standard symlinks (best-effort).
     populate_dev();
 
-    // 7. resolv.conf from the old root (best-effort; skip if absent).
-    copy_resolv_conf();
+    // 7. Bind the generated runtime files over the regular mountpoints
+    //    supplied by the top-most init layer.
+    if let Err(e) = bind_runtime_files(cfg.session, cfg.hostname.is_some()) {
+        fail(status, "runtime files", e);
+    }
 
     // 8. PTY setup (tty mode): allocate in our own devpts, wire stdio,
     //    ship the master to the parent.
@@ -127,8 +131,9 @@ pub(crate) fn child_main(cfg: &ChildConfig<'_>) -> isize {
         fail(status, "pty", e);
     }
 
-    // 9. Drop the old root; only resolv.conf depended on it.
-    if let Err(e) = mount::unmount_old_root(Path::new("/oldroot")) {
+    // 9. Drop the old root; runtime-file bind sources remain referenced by
+    //    their mounts after the source paths disappear.
+    if let Err(e) = mount::unmount_old_root(Path::new(OLD_ROOT)) {
         fail(status, "umount(/oldroot)", e.to_string());
     }
 
@@ -297,27 +302,32 @@ fn drop_privileges(run_as: &RunAs) -> Result<(), String> {
     Ok(())
 }
 
-/// Copy the host's resolv.conf (via /oldroot) so DNS works even when the
-/// container rootfs has none or a dangling systemd-resolved symlink.
-/// Best-effort: absent source is silently skipped.
-fn copy_resolv_conf() {
-    let src = Path::new("/oldroot/etc/resolv.conf");
-    let Ok(content) = std::fs::read(src) else {
-        return; // absent or unreadable -> skip
-    };
-    let dst = Path::new("/etc/resolv.conf");
-    // Already identical (e.g. host resolv.conf is a regular file visible
-    // through the overlay): skip, so a plain `orca run` does not dirty
-    // the upper.
-    if std::fs::read(dst).is_ok_and(|existing| existing == content) {
-        return;
+/// Bind the session's generated network/identity files after pivot_root.
+/// The source paths are reached through the still-mounted old root.
+fn bind_runtime_files(session: &SessionPaths, bind_identity: bool) -> Result<(), String> {
+    let runtime_dir = session.runtime_files();
+    let source_dir = Path::new(OLD_ROOT).join(
+        runtime_dir
+            .strip_prefix("/")
+            .unwrap_or(runtime_dir.as_path()),
+    );
+    bind_runtime_file(&source_dir, ETC_RESOLV_CONF)?;
+    if bind_identity {
+        for target in IDENTITY_FILE_PATHS {
+            bind_runtime_file(&source_dir, target)?;
+        }
     }
-    // Remove a pre-existing file/symlink so we do not write through a
-    // (possibly dangling) symlink into /run.
-    let _ = std::fs::remove_file(dst);
-    if let Err(e) = std::fs::write(dst, content) {
-        warn("resolv.conf", e);
-    }
+    Ok(())
+}
+
+fn bind_runtime_file(source_dir: &Path, target: &str) -> Result<(), String> {
+    let target = Path::new(target);
+    let name = target
+        .file_name()
+        .ok_or_else(|| format!("runtime file path has no file name: {}", target.display()))?;
+    let source = source_dir.join(name);
+    mount::bind_mount(&source, target).map_err(|e| format!("{}: {e}", target.display()))?;
+    Ok(())
 }
 
 /// Allocate a PTY from our own devpts, make its slave our controlling

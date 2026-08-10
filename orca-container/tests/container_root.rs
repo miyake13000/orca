@@ -48,6 +48,9 @@ fn host_container_isolates_writes_and_propagates_exit_code() {
             // so /dev/null must be forced back to 666 (regression test).
             format!(
                 "echo data > /{marker} && [ \"$(hostname)\" = itest ] \
+                 && [ \"$(cat /etc/hostname)\" = itest ] \
+                 && grep -q '127.0.1.1[[:space:]]*itest' /etc/hosts \
+                 && [ -s /etc/resolv.conf ] \
                  && [ \"$(stat -c %a /dev/null)\" = 666 ] \
                  && [ \"$(stat -c %a /dev/tty)\" = 666 ] && exit 7"
             ),
@@ -61,6 +64,11 @@ fn host_container_isolates_writes_and_propagates_exit_code() {
     // The write landed in the upper, not on the host.
     assert!(upper.join(marker).is_file());
     assert!(!std::path::Path::new("/").join(marker).exists());
+    // Generated files are bind-mounted from the disposable session and
+    // therefore never copied into the persistent upper layer.
+    for name in ["resolv.conf", "hosts", "hostname"] {
+        assert!(!upper.join("etc").join(name).exists());
+    }
     // The session directory was cleaned up.
     assert!(!dir.path().join("session").exists());
 }

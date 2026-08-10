@@ -152,14 +152,9 @@ impl PseudoMount {
     }
 }
 
-/// Bind-mount `src` onto `dst` (used for `/dev/console`).
+/// Bind-mount `src` onto `dst` (used for generated runtime files and
+/// `/dev/console`).
 pub(crate) fn bind_mount(src: &Path, dst: &Path) -> Result<(), MountError> {
-    mount(
-        Some(src),
-        dst,
-        None::<&str>,
-        MsFlags::MS_BIND,
-        None::<&str>,
-    )
-    .map_err(|e| syscall_err(dst, e))
+    mount(Some(src), dst, None::<&str>, MsFlags::MS_BIND, None::<&str>)
+        .map_err(|e| syscall_err(dst, e))
 }

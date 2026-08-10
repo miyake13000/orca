@@ -12,7 +12,7 @@
 //!   (tty mode only). The parent never `setns`es into the child.
 
 use std::os::fd::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use nix::sched::CloneFlags;
 use nix::unistd::Pid;
@@ -21,6 +21,11 @@ use orca_image::ContainerImage;
 use crate::image::SessionPaths;
 use crate::mount::MountError;
 use crate::{STACK_SIZE, container::tty::TtyConnector};
+
+const ETC_RESOLV_CONF: &str = "/etc/resolv.conf";
+const ETC_HOSTS: &str = "/etc/hosts";
+const ETC_HOSTNAME: &str = "/etc/hostname";
+const IDENTITY_FILE_PATHS: [&str; 2] = [ETC_HOSTS, ETC_HOSTNAME];
 
 pub(crate) mod child;
 pub(crate) mod parent;
@@ -33,6 +38,14 @@ pub enum ContainerError {
     #[error("session directory {path}: {source}")]
     Session {
         /// The session path.
+        path: PathBuf,
+        /// Underlying error.
+        source: std::io::Error,
+    },
+    /// Preparing one of the generated runtime files failed.
+    #[error("runtime file {path}: {source}")]
+    RuntimeFile {
+        /// The file being read or written.
         path: PathBuf,
         /// Underlying error.
         source: std::io::Error,
@@ -181,6 +194,24 @@ impl Container<Created> {
         use nix::fcntl::OFlag;
         use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
 
+        // A configured hostname is effective only in a private UTS
+        // namespace. None means inherit it unchanged and leave the
+        // image's hosts/hostname files untouched.
+        let hostname = if self.opts.uts {
+            self.hostname.as_deref()
+        } else {
+            None
+        };
+        let (init_etc, runtime_dir) = prepare_runtime_file_dirs(&self.session)?;
+        prepare_resolv_conf(
+            &init_etc,
+            &runtime_dir,
+            Path::new(ETC_RESOLV_CONF),
+        )?;
+        if let Some(hostname) = hostname {
+            prepare_hostname_files(&init_etc, &runtime_dir, hostname)?;
+        }
+
         // Status pipe: CLOEXEC on both ends; the write end auto-closes at
         // the child's exec, turning parent-side EOF into "success".
         let (status_r, status_w) =
@@ -202,8 +233,7 @@ impl Container<Created> {
             env: &self.env,
             cwd: &self.cwd,
             run_as: self.run_as.as_ref(),
-            hostname: self.hostname.as_deref(),
-            set_hostname: self.opts.uts,
+            hostname,
             status_fd: status_w.as_raw_fd(),
             sock_fd: sock_child.as_raw_fd(),
         };
@@ -270,6 +300,79 @@ impl Container<Created> {
             },
         })
     }
+}
+
+fn prepare_runtime_file_dirs(
+    session: &SessionPaths,
+) -> Result<(PathBuf, PathBuf), ContainerError> {
+    let init_etc = session.init_layer().join("etc");
+    std::fs::create_dir_all(&init_etc).map_err(|source| ContainerError::RuntimeFile {
+        path: init_etc.clone(),
+        source,
+    })?;
+    let runtime_dir = session.runtime_files();
+    std::fs::create_dir_all(&runtime_dir).map_err(|source| ContainerError::RuntimeFile {
+        path: runtime_dir.clone(),
+        source,
+    })?;
+    Ok((init_etc, runtime_dir))
+}
+
+fn prepare_resolv_conf(
+    init_etc: &Path,
+    runtime_dir: &Path,
+    resolv_path: &Path,
+) -> Result<(), ContainerError> {
+    let resolv = std::fs::read(resolv_path).map_err(|source| ContainerError::RuntimeFile {
+        path: resolv_path.to_path_buf(),
+        source,
+    })?;
+    write_runtime_file(init_etc, runtime_dir, ETC_RESOLV_CONF, &resolv)?;
+    Ok(())
+}
+
+fn prepare_hostname_files(
+    init_etc: &Path,
+    runtime_dir: &Path,
+    hostname: &str,
+) -> Result<(), ContainerError> {
+    let hosts = format!(
+        "127.0.0.1\tlocalhost\n127.0.1.1\t{hostname}\n\
+         ::1\tlocalhost ip6-localhost ip6-loopback\n\
+         fe00::0\tip6-localnet\nff00::0\tip6-mcastprefix\n\
+         ff02::1\tip6-allnodes\nff02::2\tip6-allrouters\n"
+    );
+    let hostname_file = format!("{hostname}\n");
+    write_runtime_file(init_etc, runtime_dir, ETC_HOSTS, hosts.as_bytes())?;
+    write_runtime_file(
+        init_etc,
+        runtime_dir,
+        ETC_HOSTNAME,
+        hostname_file.as_bytes(),
+    )?;
+    Ok(())
+}
+
+fn write_runtime_file(
+    init_etc: &Path,
+    runtime_dir: &Path,
+    path: &str,
+    content: &[u8],
+) -> Result<(), ContainerError> {
+    let name = Path::new(path)
+        .file_name()
+        .expect("runtime file constants must have a file name");
+    let mountpoint = init_etc.join(name);
+    std::fs::write(&mountpoint, []).map_err(|source| ContainerError::RuntimeFile {
+        path: mountpoint,
+        source,
+    })?;
+    let runtime_file = runtime_dir.join(name);
+    std::fs::write(&runtime_file, content).map_err(|source| ContainerError::RuntimeFile {
+        path: runtime_file,
+        source,
+    })?;
+    Ok(())
 }
 
 impl Container<Running> {
@@ -427,8 +530,8 @@ impl ContainerBuilder {
         self
     }
 
-    /// Set the container hostname (applied when UTS is unshared;
-    /// defaults to `"orca"`).
+    /// Set the container hostname when UTS is unshared. By default the
+    /// inherited hostname is left unchanged.
     pub fn hostname(mut self, name: &str) -> Self {
         self.hostname = Some(name.to_string());
         self
@@ -461,6 +564,18 @@ impl ContainerBuilder {
 mod tests {
     use super::*;
 
+    fn session_in(dir: &std::path::Path) -> SessionPaths {
+        let base = dir.join("session");
+        SessionPaths {
+            rootfs: base.join("rootfs"),
+            work: base.join("work"),
+            fake_rootfs: base.join("fake_rootfs"),
+            fake_upper: base.join("fake_upper"),
+            fake_work: base.join("fake_work"),
+            base,
+        }
+    }
+
     #[test]
     fn clone_flags_follow_opts() {
         let all = build_clone_flags(&NamespaceOpts {
@@ -479,5 +594,60 @@ mod tests {
             net: false,
         });
         assert_eq!(min, CloneFlags::CLONE_NEWNS);
+    }
+
+    #[test]
+    fn runtime_files_follow_resolv_symlink_and_use_regular_mountpoints() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let resolv_target = dir.path().join("generated-resolv.conf");
+        std::fs::write(&resolv_target, "nameserver 192.0.2.53\n").unwrap();
+        let resolv_link = dir.path().join("resolv.conf");
+        symlink(&resolv_target, &resolv_link).unwrap();
+
+        let session = session_in(dir.path());
+        let (init_etc, runtime_dir) = prepare_runtime_file_dirs(&session).unwrap();
+        prepare_resolv_conf(&init_etc, &runtime_dir, &resolv_link).unwrap();
+        prepare_hostname_files(&init_etc, &runtime_dir, "test-env").unwrap();
+
+        for path in [ETC_RESOLV_CONF, ETC_HOSTS, ETC_HOSTNAME] {
+            let name = Path::new(path).file_name().unwrap();
+            let metadata = std::fs::symlink_metadata(init_etc.join(name)).unwrap();
+            assert!(metadata.file_type().is_file());
+            assert_eq!(metadata.len(), 0);
+        }
+        let runtime = session.runtime_files();
+        assert_eq!(
+            std::fs::read(runtime.join("resolv.conf")).unwrap(),
+            b"nameserver 192.0.2.53\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(runtime.join("hostname")).unwrap(),
+            "test-env\n"
+        );
+        assert!(
+            std::fs::read_to_string(runtime.join("hosts"))
+                .unwrap()
+                .contains("127.0.1.1\ttest-env")
+        );
+    }
+
+    #[test]
+    fn absent_hostname_only_prepares_resolver() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolv = dir.path().join("resolv.conf");
+        std::fs::write(&resolv, "nameserver 192.0.2.53\n").unwrap();
+        let session = session_in(dir.path());
+
+        let (init_etc, runtime_dir) = prepare_runtime_file_dirs(&session).unwrap();
+        prepare_resolv_conf(&init_etc, &runtime_dir, &resolv).unwrap();
+
+        assert!(init_etc.join("resolv.conf").is_file());
+        for path in IDENTITY_FILE_PATHS {
+            let name = Path::new(path).file_name().unwrap();
+            assert!(!init_etc.join(name).exists());
+            assert!(!session.runtime_files().join(name).exists());
+        }
     }
 }
