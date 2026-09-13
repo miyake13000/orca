@@ -116,6 +116,8 @@ struct RuntimeConfig {
     env: Option<Vec<String>>,
     #[serde(rename = "WorkingDir", default)]
     working_dir: Option<String>,
+    #[serde(rename = "User", default)]
+    user: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -158,42 +160,42 @@ impl Downloader {
             .to_string();
         let body = resp.bytes()?;
 
-        let (manifest, manifest_digest) = if media_type.contains("list") || media_type.contains("index") {
-            let index: ManifestIndex = serde_json::from_slice(&body)
-                .map_err(|e| PullError::Malformed(e.to_string()))?;
-            let arch = host_architecture();
-            let entry = index
-                .manifests
-                .iter()
-                .find(|m| {
-                    m.platform
-                        .as_ref()
-                        .is_some_and(|p| p.os == "linux" && p.architecture == arch)
-                })
-                .ok_or_else(|| PullError::NoPlatform(arch.to_string()))?;
-            let url = manifest_url(&r, &entry.digest);
-            let resp = session.get(&url, Some(ACCEPT_MANIFEST), &r)?;
-            let digest = parse_sha256(&entry.digest)?;
-            let body = resp.bytes()?;
-            let manifest: ManifestV2 = serde_json::from_slice(&body)
-                .map_err(|e| PullError::Malformed(e.to_string()))?;
-            (manifest, digest)
-        } else {
-            let manifest: ManifestV2 = serde_json::from_slice(&body)
-                .map_err(|e| PullError::Malformed(e.to_string()))?;
-            let digest = match digest_header {
-                Some(d) => parse_sha256(&d)?,
-                None => sha256_of(&body),
+        let (manifest, manifest_digest) =
+            if media_type.contains("list") || media_type.contains("index") {
+                let index: ManifestIndex = serde_json::from_slice(&body)
+                    .map_err(|e| PullError::Malformed(e.to_string()))?;
+                let arch = host_architecture();
+                let entry = index
+                    .manifests
+                    .iter()
+                    .find(|m| {
+                        m.platform
+                            .as_ref()
+                            .is_some_and(|p| p.os == "linux" && p.architecture == arch)
+                    })
+                    .ok_or_else(|| PullError::NoPlatform(arch.to_string()))?;
+                let url = manifest_url(&r, &entry.digest);
+                let resp = session.get(&url, Some(ACCEPT_MANIFEST), &r)?;
+                let digest = parse_sha256(&entry.digest)?;
+                let body = resp.bytes()?;
+                let manifest: ManifestV2 = serde_json::from_slice(&body)
+                    .map_err(|e| PullError::Malformed(e.to_string()))?;
+                (manifest, digest)
+            } else {
+                let manifest: ManifestV2 = serde_json::from_slice(&body)
+                    .map_err(|e| PullError::Malformed(e.to_string()))?;
+                let digest = match digest_header {
+                    Some(d) => parse_sha256(&d)?,
+                    None => sha256_of(&body),
+                };
+                (manifest, digest)
             };
-            (manifest, digest)
-        };
 
         // Fetch the config blob for entrypoint/cmd/env/working_dir.
         let config_url = blob_url(&r, &manifest.config.digest);
-        let config: ConfigBlob = serde_json::from_slice(
-            &session.get(&config_url, None, &r)?.bytes()?,
-        )
-        .map_err(|e| PullError::Malformed(e.to_string()))?;
+        let config: ConfigBlob =
+            serde_json::from_slice(&session.get(&config_url, None, &r)?.bytes()?)
+                .map_err(|e| PullError::Malformed(e.to_string()))?;
 
         // Download and extract missing layers.
         let mut layer_digests = Vec::new();
@@ -218,6 +220,7 @@ impl Downloader {
             cmd: rc.cmd.unwrap_or_default(),
             env: rc.env.unwrap_or_default(),
             working_dir: rc.working_dir.unwrap_or_default().into(),
+            user: rc.user.unwrap_or_default(),
             pulled_at: Utc::now(),
         })
     }
@@ -277,10 +280,10 @@ impl Session {
             .find(|(k, _)| k == "realm")
             .map(|(_, v)| v.clone())
             .ok_or_else(|| PullError::Auth(format!("no realm in challenge: {challenge}")))?;
-        let mut req = self.client.get(&realm).query(&[(
-            "scope",
-            format!("repository:{}:pull", r.repository),
-        )]);
+        let mut req = self
+            .client
+            .get(&realm)
+            .query(&[("scope", format!("repository:{}:pull", r.repository))]);
         if let Some((_, service)) = params.iter().find(|(k, _)| k == "service") {
             req = req.query(&[("service", service)]);
         }
@@ -438,10 +441,7 @@ mod tests {
             "realm".to_string(),
             "https://auth.docker.io/token".to_string()
         )));
-        assert!(params.contains(&(
-            "service".to_string(),
-            "registry.docker.io".to_string()
-        )));
+        assert!(params.contains(&("service".to_string(), "registry.docker.io".to_string())));
     }
 
     #[test]
@@ -451,5 +451,18 @@ mod tests {
             manifest_url(&r, "24.04"),
             "https://registry-1.docker.io/v2/library/ubuntu/manifests/24.04"
         );
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    #[test]
+    fn user_declaration_is_preserved() {
+        let blob: ConfigBlob =
+            serde_json::from_str(r#"{"config":{"User":"app:workers","WorkingDir":"/app"}}"#)
+                .unwrap();
+        assert_eq!(blob.config.user.as_deref(), Some("app:workers"));
+        assert_eq!(blob.config.working_dir.as_deref(), Some("/app"));
     }
 }

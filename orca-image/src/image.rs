@@ -28,6 +28,8 @@ pub struct ImageConfig {
     pub env: Vec<String>,
     /// Declared working directory (`/` when unset).
     pub working_dir: PathBuf,
+    /// OCI User declaration (user[:group]); empty means root.
+    pub user: String,
 }
 
 impl Default for ImageConfig {
@@ -38,6 +40,7 @@ impl Default for ImageConfig {
             cmd: Vec::new(),
             env: Vec::new(),
             working_dir: PathBuf::from("/"),
+            user: String::new(),
         }
     }
 }

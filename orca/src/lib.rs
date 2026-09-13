@@ -29,6 +29,7 @@
 #![warn(missing_docs)]
 
 mod apply;
+pub mod config;
 mod env;
 mod exec_spec;
 mod external_image_store;
@@ -37,7 +38,7 @@ mod lock;
 mod orca;
 mod run;
 
-pub use env::{Env, EnvError, EnvSettings, EnvStore, orca_root};
+pub use env::{Env, EnvError, EnvStore, orca_root};
 pub use external_image_store::{ExternalImageError, ExternalImageStore};
 pub use image::{ApplyPlan, ApplyRecovery, Image, ImageError, is_setuid_source};
 pub use orca::Orca;
@@ -49,3 +50,5 @@ pub use orca_hash::{Hash, to_hex};
 pub use orca_image::external_image::ImageManifest;
 pub use orca_image::{BaseImageRef, Change};
 pub use orca_vcs::Head;
+
+pub use config::{Config, ConfigError, NamespaceSettings, Settings};

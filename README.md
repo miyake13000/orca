@@ -50,18 +50,17 @@ wget https://github.com/miyake13000/orca/releases/latest/download/orca
     - setuid (recommended): `sudo chown root:root orca && sudo chmod 4755 orca`
     - sudo: `echo "alias orca='sudo \$(which orca)'" >> ~/.bashrc && source ~/.bashrc`
 
-|                     | setuid              | sudo                      |
-| ------------------- | ------------------- | ------------------------- |
-| Environment variables | preserved         | reset (`sudo -E` to preserve) |
-| `orca run` user     | the invoking user   | root (`orca run --user $(id -u) --group $(id -g)` to keep) |
-| Data location       | `$HOME/.local/share/orca` | `/root/.local/share/orca` |
+Both installation methods use the same configured execution identity (host default: root).
+Host environment variables are not inherited except TERM for interactive runs.
+The default data location follows the invoking process's HOME/XDG configuration;
+use `--root` to choose it explicitly under sudo. See Configuration below.
 
 ## Command Reference
 
 ### Global Options
 
 ```
-orca [--env|-e <name-or-uuid>] <command> [args]
+orca [--root <path>] [--env|-e <name-or-uuid>] <command> [args]
 ```
 
 The target environment is resolved in this order:
@@ -137,39 +136,95 @@ The target environment is resolved in this order:
 
 ---
 
-## Configuration (envs.toml)
+## Configuration (config.toml)
 
-Editing `envs/envs.toml` in the data location lets you configure all environments (`[defaults]`) and individual ones (`[envs.settings]`). The priority is **CLI arguments > env-specific > defaults > image declaration** (only `blacklist` merges as the union of defaults and env-specific).
+User settings live in `<root>/config.toml`. Environment metadata in
+`<root>/envs/envs.toml` is managed by orca and is not a user configuration file.
+There is no migration from the old settings format.
+
+The data root is selected by `--root`, then `ORCA_ROOT`, then the platform's
+local data directory (`~/.local/share/orca` normally). To use your own data
+through sudo, use `sudo orca --root "$HOME/.local/share/orca" run`.
+A relative `--root` is resolved against the invoking working directory.
+
+All settings are optional. Missing config means no overrides; invalid TOML,
+unknown fields and invalid setting values are errors. Environment names match
+exactly, including case; quote names containing dots. Names may be configured
+before creation, and configuration survives deletion/recreation of an env.
+
+Priority: **arguments > named environment > global > image/tool defaults**.
 
 ```toml
-[defaults]                  # applies to every env
-env = ["EDITOR=vim"]
-blacklist = ["*_history", ".cache"]
+[global]
+blacklist = ["*.log", "*.tmp"]
 
-[[envs]]
-# ...fields managed by orca...
+[global.env]
+EDITOR = "vim"
+LANG = "ja_JP.UTF-8"
 
-[envs.settings]             # this env only (every field optional)
-cmd = ["/bin/zsh"]
-working_dir = "/root"
-blacklist = ["/var/log"]
+[global.namespaces]
+pid = true
+uts = true
+ipc = true
+network = false
+
+[envs."dev"]
+cmd = ["/bin/bash", "-l"]
+working_dir = "/workspace"
+user = "1000"
+group = "1000"
+blacklist = ["!important.log"]
+
+[envs."dev".env]
+EDITOR = "nvim"
+
+[envs."dev".namespaces]
+network = true
 ```
 
-| Field | Description |
-|---|---|
-| `entrypoint` / `cmd` | Override the startup command |
-| `env` | Add / override environment variables (`KEY=VALUE`) |
-| `working_dir` | Override the working directory |
-| `blacklist` | Paths excluded from diff / apply (see below) |
+| Setting | CLI equivalent | Merge rule |
+|---|---|---|
+| `cmd` | `run <command> [args]` | Replace complete argv; explicit empty argv is invalid |
+| `env` | `run --set-env KEY=VALUE` (repeatable) | Merge by key, later values win |
+| `working_dir` | `run --working-dir /path` | Replace; absolute container path only |
+| `user` / `group` | `run --user` / `--group` | Replace |
+| `namespaces.pid/uts/ipc/network` | `run --pid=true`, `--uts=false`, etc. | Replace; true isolates, false shares |
+| `blacklist` | `diff/apply --blacklist PATTERN` (repeatable) | Append rules, last matching rule wins |
 
-Blacklist entries are gitignore-style patterns:
+`cmd` replaces the entire image `Entrypoint + Cmd`; orca has no separate
+`entrypoint` setting. Values are literal: no `$VAR`, `${VAR}`, or `~` expansion.
+An empty environment value is allowed; removing a variable is not supported.
 
-- `/xxx/yyy` — path anchored at the root (any pattern containing a slash is anchored)
-- `xxx` — file/directory name match at any depth
-- Wildcards `*` (never crosses a path separator) and `?`
-- Matching a directory excludes its whole subtree
+Users and groups are resolved **after pivot_root**, using only the container's
+`/etc/passwd` and `/etc/group` (not NSS). Numeric IDs need not be registered;
+unknown names abort startup. The image's `USER` is the default, or UID 0 if
+absent (also the host default), irrespective of sudo/setuid invocation.
+An explicit user replaces the image's complete `USER` declaration; a separately
+configured group overrides the primary group. Without a group override, use
+the passwd primary GID (or 0 for an unregistered UID) and supplementary group
+memberships. An explicit group clears supplementary groups.
 
-The blacklist only affects what `orca diff` shows and what `orca apply` applies. Commits are unaffected: layers always record every file.
+Host environment variables are **not inherited**, except TERM during PTY runs.
+Environment construction order is: fixed PATH → image environment → resolved
+user's HOME/USER/LOGNAME/SHELL → terminal TERM → global/env/argument variables.
+The default PATH is `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`.
+For an unregistered UID, HOME is `/`, SHELL is `/bin/sh`, and USER/LOGNAME are
+the numeric UID. TERM comes from the caller during PTY runs, or `dumb` if absent;
+explicit settings override it. Non-PTY runs do not synthesize TERM.
+The selected shell may subsequently process its own startup files.
+
+Without `cmd`, host environments use the resolved user's shell; external images
+use `Entrypoint + Cmd`. Without `working_dir`, host environments use the invoking
+cwd, external images use `WorkingDir` (or `/`). Only the host's implicit cwd may
+fall back to `/`; a failed fallback, explicit cwd failure or image cwd failure
+aborts startup. Cwd is entered after switching credentials.
+
+Blacklist patterns support root-anchored paths (`/var/log` or patterns containing
+`/`), names at any depth, `*` (not across `/`), and `?`. `!pattern` cancels an
+exclusion; an excluded parent directory must itself be re-included before any
+child can be re-included. This is a subset of Git ignore syntax. Rules accumulate
+in global → env → argument order; `[]` adds nothing, it does not reset earlier
+rules. Blacklists affect **diff and apply only**; commits still retain all files.
 
 ## Limitations
 

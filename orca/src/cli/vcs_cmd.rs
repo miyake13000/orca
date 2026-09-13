@@ -19,9 +19,10 @@ pub fn diff(
     cli_env: &Option<String>,
     a: Option<&str>,
     b: Option<&str>,
+    blacklist: &[String],
 ) -> anyhow::Result<()> {
     let env = select_env(store, cli_env)?;
-    let image = env.image()?;
+    let image = env.image()?.with_blacklist(blacklist);
     for change in image.diff(a, b)? {
         println!("{}", format_change(&change));
     }
@@ -43,8 +44,7 @@ pub fn log(store: &EnvStore, cli_env: &Option<String>) -> anyhow::Result<()> {
             }
         }
         for branch in data.branches() {
-            if branch.commit_hash() == commit.hash() && Some(branch.name()) != head.branch_name()
-            {
+            if branch.commit_hash() == commit.hash() && Some(branch.name()) != head.branch_name() {
                 decorations.push(branch.name().to_string());
             }
         }
@@ -91,7 +91,11 @@ pub fn branch(
         let data = image.data();
         let current = data.head().branch_name();
         for branch in data.branches() {
-            let marker = if Some(branch.name()) == current { "*" } else { " " };
+            let marker = if Some(branch.name()) == current {
+                "*"
+            } else {
+                " "
+            };
             println!(
                 "{} {} {}",
                 marker,

@@ -25,12 +25,25 @@ impl Orca {
 
     /// The environment area (`envs/` and `run/`): loads `envs.toml`.
     pub fn envs(&self) -> Result<EnvStore, EnvError> {
-        EnvStore::load(&self.root)
+        EnvStore::load(
+            &self.root.join("envs/envs.toml"),
+            &self.root.join("envs"),
+            &self.root.join("run"),
+            self.external_images(),
+        )
+    }
+
+    /// Read user settings from `<root>/config.toml`; never modifies it.
+    pub fn config(&self) -> Result<crate::Config, crate::ConfigError> {
+        crate::Config::load(&self.root.join("config.toml"))
     }
 
     /// The external-image area (`images/`): pulled images and their
     /// blob CAS.
     pub fn external_images(&self) -> ExternalImageStore {
-        ExternalImageStore::new(&self.root)
+        ExternalImageStore::new(
+            &self.root.join("images/images.toml"),
+            &self.root.join("images/layers/sha256"),
+        )
     }
 }

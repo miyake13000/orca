@@ -131,3 +131,33 @@ fn run_as_drops_all_ids_completely() {
     let done = container.run().unwrap().wait().unwrap();
     assert_eq!(done.status(), 9);
 }
+
+#[test]
+#[ignore = "requires root (mount / clone / pivot_root)"]
+fn deferred_cwd_can_fall_back_to_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let upper = dir.path().join("diff");
+    std::fs::create_dir_all(&upper).unwrap();
+    let resolver = std::sync::Arc::new(|| {
+        Ok(orca_container::Execution {
+            cmd: vec!["/bin/sh".into(), "-c".into(), "test \"$PWD\" = /".into()],
+            env: vec![TEST_PATH.into()],
+            cwd: "/orca-no-such-cwd-for-test".into(),
+            fallback_cwd: true,
+            run_as: RunAs {
+                uid: 0,
+                gid: 0,
+                groups: vec![],
+            },
+        })
+    });
+    let done = ContainerBuilder::new(host_image(&upper), session_in(dir.path()))
+        .resolve_exec(resolver)
+        .build()
+        .unwrap()
+        .run()
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert_eq!(done.status(), 0);
+}

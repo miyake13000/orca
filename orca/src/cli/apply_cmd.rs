@@ -12,9 +12,10 @@ pub fn apply(
     no_upper: bool,
     dry_run: bool,
     yes: bool,
+    blacklist: &[String],
 ) -> anyhow::Result<()> {
     let env = select_env(store, cli_env)?;
-    let image = env.image()?;
+    let image = env.image()?.with_blacklist(blacklist);
 
     // Unfinished journal from a crash/interrupt: offer recovery first.
     if let Some(recovery) = image.pending_apply()? {

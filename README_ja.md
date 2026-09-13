@@ -51,19 +51,17 @@ wget https://github.com/miyake13000/orca/releases/latest/download/orca
     - setuid の場合(推奨): `sudo chown root:root orca && sudo chmod 4755 orca`
     - sudo の場合: `echo "alias orca='sudo \$(which orca)'" >> ~/.bashrc && source ~/.bashrc`
 
-|                    | setuid              | sudo                      |
-| ------------------ | ------------------- | ------------------------- |
-| 環境変数            | 維持                 | リセット (`sudo -E` で維持) |
-| `orca run` のユーザ | 現在のユーザ          | root (`orca run --user $(id -u) --group $(id -g)`で維持) |
-| データ保存場所       | `$HOME/.local/share/orca` | `/root/.local/share/orca` |
-
+どちらの起動方法も設定で決定したユーザを使う (ホストの既定値は root)。
+ホストの環境変数は対話時の TERM 以外は継承しない。
+既定のデータ保存先は起動プロセスの HOME/XDG 設定に従うため、sudo では
+`--root` で明示指定できる。詳細は「設定」を参照。
 
 ## コマンド仕様
 
 ### グローバルオプション
 
 ```
-orca [--env|-e <name-or-uuid>] <command> [args]
+orca [--root <path>] [--env|-e <name-or-uuid>] <command> [args]
 ```
 
 対象の環境は次の優先順位で決まる:
@@ -140,37 +138,89 @@ orca [--env|-e <name-or-uuid>] <command> [args]
 ---
 
 blacklist が効くのは `orca diff` の表示と `orca apply` の適用対象のみ．commit には影響せず，レイヤには全ファイルが記録される．
-## 設定 (envs.toml)
+## 設定 (config.toml)
 
-データ保存場所の `envs/envs.toml` を編集すると，全 env 共通 (`[defaults]`) と env 個別 (`[envs.settings]`) の設定を書ける．優先度は **コマンドライン引数 > env 個別 > 共通 > イメージの宣言** (blacklist のみ共通と個別の和集合)．
+ユーザ設定は `<root>/config.toml` に記述する。`<root>/envs/envs.toml` は
+orca が管理する環境一覧・current 等の情報で、ユーザ設定を含まない。
+旧設定からの移行処理は設けない。
+
+データルートは `--root` > `ORCA_ROOT` > 標準のローカルデータディレクトリ
+(通常 `~/.local/share/orca`) で決まる。
+`sudo orca --root "$HOME/.local/share/orca" run` でユーザ側のデータを利用できる。
+相対 `--root` は起動元の CWD を基準に絶対パスへ変換する。
+
+全項目は省略可能。設定ファイルがなければ設定なし。不正な TOML・未知の項目・
+不正な値はエラー。env 名は大文字・小文字を区別した完全一致で、未作成の名前も
+記述できる。削除後も設定は残り、同名で再作成すると再び適用される。
+
+優先順位は **引数 > env 固有 > global > イメージ・ツールの既定値**。
 
 ```toml
-[defaults]                  # 全 env 共通
-env = ["EDITOR=vim"]
-blacklist = ["*_history", ".cache"]
+[global]
+blacklist = ["*.log", "*.tmp"]
 
-[[envs]]
-# ...orca が管理するフィールド...
+[global.env]
+EDITOR = "vim"
+LANG = "ja_JP.UTF-8"
 
-[envs.settings]             # この env だけの設定 (全フィールド任意)
-cmd = ["/bin/zsh"]
-working_dir = "/root"
-blacklist = ["/var/log"]
+[global.namespaces]
+pid = true
+uts = true
+ipc = true
+network = false
+
+[envs."dev"]
+cmd = ["/bin/bash", "-l"]
+working_dir = "/workspace"
+user = "1000"
+group = "1000"
+blacklist = ["!important.log"]
+
+[envs."dev".env]
+EDITOR = "nvim"
+
+[envs."dev".namespaces]
+network = true
 ```
 
-| フィールド | 説明 |
-|---|---|
-| `entrypoint` / `cmd` | 起動コマンドの上書き |
-| `env` | 環境変数の追加/上書き (`KEY=VALUE`) |
-| `working_dir` | 作業ディレクトリの上書き |
-| `blacklist` | diff / apply から除外するパス (下記) |
+| 設定 | 対応する引数 | 合成規則 |
+|---|---|---|
+| `cmd` | `run <command> [args]` | argv 全体を置換。明示的な空配列はエラー |
+| `env` | `run --set-env KEY=VALUE` (複数指定可) | キーごとに上書き |
+| `working_dir` | `run --working-dir /path` | 置換。コンテナ内の絶対パスのみ |
+| `user` / `group` | `run --user` / `--group` | 置換 |
+| `namespaces.pid/uts/ipc/network` | `run --pid=true`、`--uts=false` 等 | 置換。true=分離、false=共有 |
+| `blacklist` | `diff/apply --blacklist PATTERN` (複数指定可) | 順に連結し、最後に一致した規則を採用 |
 
-blacklist は Git ignore 風のパターンで指定する:
+orca の `entrypoint` 設定は廃止し、`cmd` でイメージの `Entrypoint + Cmd` 全体を
+置き換える。値はリテラルで `$VAR`・`${VAR}`・`~` を展開しない。
+環境変数の空文字は許可するが、変数を削除する指定は設けない。
 
-- `/xxx/yyy` — ルート起点のパス指定 (スラッシュを含むパターンはアンカー扱い)
-- `xxx` — ファイル/ディレクトリ名一致 (任意の深さ)
-- ワイルドカード `*` (パス区切りは跨がない)・`?`
-- ディレクトリにマッチすると配下も丸ごと除外
+user/group は **pivot_root 後**の `/etc/passwd`・`/etc/group` で解決する
+(NSS は使わない)。数値 ID は未登録でも受け入れ、名前が見つからなければ起動を中止する。
+既定ユーザはイメージの `USER`、未宣言時およびホストベースでは UID 0。
+sudo / setuid による自動選択はしない。user の明示指定はイメージの `USER` 宣言全体を
+置き換え、group の明示指定があれば優先する。group 未指定時は passwd のプライマリ GID
+(未登録 UID は 0) と所属補助グループを使い、group 明示時は補助グループを空にする。
+
+ホストの環境変数は **PTY 実行時の TERM 以外は継承しない**。
+固定 PATH → イメージ ENV → ユーザ由来 HOME/USER/LOGNAME/SHELL → 端末 TERM →
+global/env/引数 ENV の順に設定する。固定 PATH は
+`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`。
+未登録 UID は HOME=`/`、SHELL=`/bin/sh`、USER/LOGNAME=UID の文字列表現とする。
+PTY 時の TERM は起動元の値、なければ `dumb`。明示 ENV が優先する。
+非 PTY 時は TERM を自動補完しない。起動後のシェルが rc 等で環境を変更することはある。
+
+cmd 未指定時、ホストは解決したユーザのシェル、外部イメージは `Entrypoint + Cmd`。
+CWD 未指定時、ホストは起動元 CWD、外部イメージは `WorkingDir` (未宣言なら `/`)。
+ホストの既定 CWD だけは移動失敗時に `/` へフォールバックし、それも失敗すれば停止する。
+明示 CWD と外部イメージの CWD での失敗は即時停止する。移動は権限変更後に行う。
+
+blacklist はルート起点のパス (`/var/log` や `/` を含むもの)、任意階層の名前、
+`*` (区切りを跨がない)、`?` を扱う Git ignore 風のサブセット。
+`!pattern` で除外を解除できるが、親ディレクトリが除外されている間は子だけを再包含できない。
+global → env → 引数の順に規則を連結する。`[]` は追加なしで、継承規則のリセットではない。
+適用対象は **diff / apply のみ**。commit は全ファイルを保持する。
 
 ## 制限事項
 

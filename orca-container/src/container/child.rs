@@ -38,6 +38,7 @@ pub(crate) struct ChildConfig<'a> {
     pub env: &'a [String],
     pub cwd: &'a Path,
     pub run_as: Option<&'a RunAs>,
+    pub resolver: Option<&'a super::ExecResolver>,
     pub hostname: Option<&'a str>,
     /// Write end of the CLOEXEC status pipe.
     pub status_fd: RawFd,
@@ -51,11 +52,7 @@ fn fail(status_fd: RawFd, stage: &str, detail: String) -> ! {
     let msg = format!("{stage}: {detail}");
     // Best-effort write; there is nothing to do about failure here.
     unsafe {
-        libc::write(
-            status_fd,
-            msg.as_ptr() as *const libc::c_void,
-            msg.len(),
-        );
+        libc::write(status_fd, msg.as_ptr() as *const libc::c_void, msg.len());
         libc::_exit(1);
     }
 }
@@ -137,38 +134,101 @@ pub(crate) fn child_main(cfg: &ChildConfig<'_>) -> isize {
         fail(status, "umount(/oldroot)", e.to_string());
     }
 
-    // 10. Complete privilege drop (required when requested; uid last so
-    //     the preceding group changes are still permitted).
-    if let Some(run_as) = cfg.run_as
+    // Resolve identity and its environment against the mounted rootfs.
+    let resolved = cfg
+        .resolver
+        .map(|resolve| resolve().unwrap_or_else(|e| fail(status, "resolve execution", e)));
+    let (cmd, env, cwd, fallback, run_as) = match &resolved {
+        Some(exec) => (
+            exec.cmd.as_slice(),
+            exec.env.as_slice(),
+            exec.cwd.as_path(),
+            exec.fallback_cwd,
+            Some(&exec.run_as),
+        ),
+        None => (cfg.cmd, cfg.env, cfg.cwd, false, cfg.run_as),
+    };
+    if let Some(run_as) = run_as
         && let Err(e) = drop_privileges(run_as)
     {
         fail(status, "drop_privileges", e);
     }
-
-    // 11. Working directory (checked as the final identity; fall back
-    //     to /).
-    if nix::unistd::chdir(cfg.cwd).is_err() {
-        let _ = nix::unistd::chdir("/");
+    if let Err(e) = nix::unistd::chdir(cwd) {
+        if !fallback {
+            fail(status, "chdir", format!("{}: {e}", cwd.display()));
+        }
+        if let Err(e) = nix::unistd::chdir("/") {
+            fail(status, "chdir(/) fallback", e.to_string());
+        }
     }
+    if cmd.is_empty() || cmd[0].is_empty() {
+        fail(status, "exec", "empty command".into());
+    }
+    let argv: Vec<CString> = cmd
+        .iter()
+        .map(|s| CString::new(s.as_str()).unwrap_or_else(|e| fail(status, "argv", e.to_string())))
+        .collect();
+    let envp: Vec<CString> = env
+        .iter()
+        .map(|s| {
+            CString::new(s.as_str()).unwrap_or_else(|e| fail(status, "environment", e.to_string()))
+        })
+        .collect();
+    // execvpe searches the *calling process* PATH, not envp. Search explicitly
+    // so only the resolved container environment controls program lookup.
+    let paths = executable_candidates(&cmd[0], env);
+    let mut last = nix::errno::Errno::ENOENT;
+    for path in paths {
+        let path = CString::new(path).unwrap_or_else(|e| fail(status, "executable", e.to_string()));
+        match nix::unistd::execve(&path, &argv, &envp).unwrap_err() {
+            nix::errno::Errno::ENOENT | nix::errno::Errno::ENOTDIR => {}
+            nix::errno::Errno::EACCES => last = nix::errno::Errno::EACCES,
+            nix::errno::Errno::ENOEXEC => {
+                // Preserve execvp's executable-text fallback using the same env.
+                let shell = CString::new("/bin/sh").unwrap();
+                let mut shell_argv = vec![shell.clone(), path];
+                shell_argv.extend(argv.iter().skip(1).cloned());
+                let error = nix::unistd::execve(&shell, &shell_argv, &envp).unwrap_err();
+                fail(status, "exec(/bin/sh)", error.to_string());
+            }
+            error => fail(status, "exec", format!("{}: {error}", cmd[0])),
+        }
+    }
+    fail(status, "exec", format!("{}: {last}", cmd[0]));
+}
 
-    // 12. exec. Reaching it closes the CLOEXEC status pipe -> parent EOF.
-    let argv: Vec<CString> = cfg
-        .cmd
+/// Produce executable candidates using only the supplied environment.
+fn executable_candidates(cmd: &str, env: &[String]) -> Vec<String> {
+    if cmd.contains('/') {
+        return vec![cmd.into()];
+    }
+    let path = env
         .iter()
-        .map(|s| CString::new(s.as_str()).unwrap_or_default())
-        .collect();
-    let envp: Vec<CString> = cfg
-        .env
-        .iter()
-        .map(|s| CString::new(s.as_str()).unwrap_or_default())
-        .collect();
-    let program = argv.first().cloned().unwrap_or_default();
-    let err = nix::unistd::execvpe(&program, &argv, &envp).unwrap_err();
-    fail(
-        status,
-        "exec",
-        format!("{}: {err}", program.to_string_lossy()),
-    );
+        .find_map(|v| v.strip_prefix("PATH="))
+        .unwrap_or("/bin:/usr/bin");
+    path.split(':')
+        .map(|dir| {
+            if dir.is_empty() {
+                cmd.into()
+            } else {
+                format!("{dir}/{cmd}")
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod exec_tests {
+    use super::*;
+    #[test]
+    fn search_uses_explicit_path_and_handles_absolute_commands() {
+        assert_eq!(
+            executable_candidates("tool", &["PATH=/custom:/bin".into()]),
+            ["/custom/tool", "/bin/tool"]
+        );
+        assert_eq!(executable_candidates("/tool", &[]), ["/tool"]);
+        assert_eq!(executable_candidates("tool", &["PATH=".into()]), ["tool"]);
+    }
 }
 
 /// Required pseudo mounts (failure aborts container start).
@@ -264,9 +324,7 @@ fn populate_dev() {
         // authoritative, so enforce the mode explicitly (chmod ignores
         // the umask).
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) =
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))
-        {
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666)) {
             warn(path, e);
         }
     }

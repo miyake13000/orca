@@ -6,13 +6,21 @@
 //! operations live in the library.
 
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 mod cli;
 
 /// Global CLI definition.
 #[derive(Parser)]
-#[command(name = "orca", version, about = "Container environments with Git-like version control")]
+#[command(
+    name = "orca",
+    version,
+    about = "Container environments with Git-like version control"
+)]
 struct Cli {
+    /// Data root (config.toml, envs, images and run). Relative to the invocation cwd.
+    #[arg(long, global = true)]
+    root: Option<PathBuf>,
     /// Target environment (name or uuid); overrides ORCA_ENV and the
     /// current environment.
     #[arg(long, short = 'e', global = true)]
@@ -57,21 +65,35 @@ enum Command {
     Clean,
     /// Enter the container, or run a command inside it
     Run {
-        /// Share the host PID namespace
-        #[arg(long)]
+        /// Isolate PID namespace; use --pid=false to share.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+        pid: Option<bool>,
+        /// Share PID namespace (alias for --pid=false).
+        #[arg(long, conflicts_with = "pid")]
         no_pid: bool,
-        /// Share the host UTS namespace
-        #[arg(long)]
+        /// Isolate UTS namespace; use --uts=false to share.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+        uts: Option<bool>,
+        /// Share UTS namespace.
+        #[arg(long, conflicts_with = "uts")]
         no_uts: bool,
-        /// Share the host IPC namespace
-        #[arg(long)]
+        /// Isolate IPC namespace; use --ipc=false to share.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+        ipc: Option<bool>,
+        /// Share IPC namespace.
+        #[arg(long, conflicts_with = "ipc")]
         no_ipc: bool,
-        /// Isolate the network namespace (shared with host by default)
-        #[arg(long, short = 'n')]
-        network: bool,
+        /// Isolate network namespace; use --network=false to share.
+        #[arg(long, short = 'n', num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+        network: Option<bool>,
+        /// Literal environment override (repeatable KEY=VALUE).
+        #[arg(long = "set-env", value_name = "KEY=VALUE", value_parser = parse_env)]
+        variables: Vec<(String, String)>,
+        /// Absolute working directory inside the container.
+        #[arg(long)]
+        working_dir: Option<PathBuf>,
         /// Run as this user inside the container (uid or name).
-        /// Default: the invoking user under a setuid install, root
-        /// under sudo
+        /// Overrides config and the image USER declaration
         #[arg(long, short = 'u')]
         user: Option<String>,
         /// Run with this group inside the container (gid or name)
@@ -89,6 +111,9 @@ enum Command {
     },
     /// Show changes (uncommitted, or of a commit)
     Diff {
+        /// Append an exclusion or ! exception (repeatable).
+        #[arg(long, allow_hyphen_values = true)]
+        blacklist: Vec<String>,
         /// Commit/branch A (omit for uncommitted changes)
         a: Option<String>,
         /// Commit/branch B to compare A against (default: the base)
@@ -137,6 +162,9 @@ enum Command {
     Gc,
     /// Apply the environment's changes to the host (host-based only)
     Apply {
+        /// Append an exclusion or ! exception (repeatable).
+        #[arg(long, allow_hyphen_values = true)]
+        blacklist: Vec<String>,
         /// Apply committed changes only (exclude uncommitted)
         #[arg(long)]
         no_upper: bool,
@@ -185,7 +213,14 @@ fn main() {
 /// Dispatch to the command handlers. Returns the process exit code
 /// (`orca run` propagates the container's).
 fn run(cli: Cli) -> anyhow::Result<i32> {
-    let orca = orca::Orca::new(orca::orca_root());
+    let root = cli.root.unwrap_or_else(orca::orca_root);
+    let root = if root.is_absolute() {
+        root
+    } else {
+        std::env::current_dir()?.join(root)
+    };
+    let orca = orca::Orca::new(root);
+    let config = orca.config()?;
     let mut store = orca.envs()?;
 
     match cli.command {
@@ -200,27 +235,54 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Command::Rm { target, yes } => cli::env_cmd::rm(&mut store, &target, yes),
         Command::Clean => cli::env_cmd::clean(&store, &cli.env),
         Command::Run {
+            pid,
             no_pid,
+            uts,
             no_uts,
+            ipc,
             no_ipc,
             network,
             user,
             group,
+            variables,
+            working_dir,
             cmd,
         } => {
             let env = cli::select_env(&store, &cli.env)?;
-            return Ok(env.image()?.run(orca::RunOpts {
-                no_pid,
-                no_uts,
-                no_ipc,
-                network,
+            let args = orca::Settings {
+                cmd: (!cmd.is_empty()).then_some(cmd),
+                env: variables.into_iter().collect(),
+                working_dir,
                 user,
                 group,
-                cmd,
-            })?);
+                namespaces: orca::NamespaceSettings {
+                    pid: if no_pid { Some(false) } else { pid },
+                    uts: if no_uts { Some(false) } else { uts },
+                    ipc: if no_ipc { Some(false) } else { ipc },
+                    network,
+                },
+                ..Default::default()
+            };
+            return Ok(env.image()?.run(config.resolve(&env.name, &args)?)?);
         }
         Command::Commit { message } => cli::vcs_cmd::commit(&store, &cli.env, &message),
-        Command::Diff { a, b } => cli::vcs_cmd::diff(&store, &cli.env, a.as_deref(), b.as_deref()),
+        Command::Diff { a, b, blacklist } => {
+            let env = cli::select_env(&store, &cli.env)?;
+            let settings = config.resolve(
+                &env.name,
+                &orca::Settings {
+                    blacklist,
+                    ..Default::default()
+                },
+            )?;
+            cli::vcs_cmd::diff(
+                &store,
+                &cli.env,
+                a.as_deref(),
+                b.as_deref(),
+                &settings.blacklist,
+            )
+        }
         Command::Log => cli::vcs_cmd::log(&store, &cli.env),
         Command::Branch { name, delete, all } => {
             cli::vcs_cmd::branch(&store, &cli.env, name, delete, all)
@@ -235,10 +297,28 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Command::Merge { branch } => cli::vcs_cmd::merge(&store, &cli.env, &branch),
         Command::Gc => cli::vcs_cmd::gc(&store, &cli.env),
         Command::Apply {
+            blacklist,
             no_upper,
             dry_run,
             yes,
-        } => cli::apply_cmd::apply(&store, &cli.env, no_upper, dry_run, yes),
+        } => {
+            let env = cli::select_env(&store, &cli.env)?;
+            let settings = config.resolve(
+                &env.name,
+                &orca::Settings {
+                    blacklist,
+                    ..Default::default()
+                },
+            )?;
+            cli::apply_cmd::apply(
+                &store,
+                &cli.env,
+                no_upper,
+                dry_run,
+                yes,
+                &settings.blacklist,
+            )
+        }
         Command::Image { command } => match command {
             ImageCommand::Pull { reference } => cli::image_cmd::pull(&orca, &reference),
             ImageCommand::Ls => cli::image_cmd::ls(&orca),
@@ -246,4 +326,50 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         },
     }?;
     Ok(0)
+}
+
+/// Parse one literal environment assignment; later occurrences replace earlier ones.
+fn parse_env(value: &str) -> Result<(String, String), String> {
+    let (key, value) = value.split_once('=').ok_or("expected KEY=VALUE")?;
+    if key.is_empty() || key.contains('\0') || value.contains('\0') {
+        return Err("invalid environment assignment".into());
+    }
+    Ok((key.into(), value.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn boolean_overrides_and_command_arguments() {
+        let cli = Cli::try_parse_from([
+            "orca",
+            "--root",
+            "data",
+            "run",
+            "--network=false",
+            "--pid",
+            "--set-env",
+            "X=a=b",
+            "bash",
+            "-l",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Run {
+                pid,
+                network,
+                variables,
+                cmd,
+                ..
+            } => {
+                assert_eq!(pid, Some(true));
+                assert_eq!(network, Some(false));
+                assert_eq!(variables, vec![("X".into(), "a=b".into())]);
+                assert_eq!(cmd, ["bash", "-l"]);
+            }
+            _ => panic!("wrong command"),
+        }
+        assert!(Cli::try_parse_from(["orca", "run", "--pid", "--no-pid"]).is_err());
+    }
 }

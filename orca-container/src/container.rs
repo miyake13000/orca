@@ -120,7 +120,7 @@ pub enum IoMode {
 /// The identity the container process drops to right before `exec`.
 ///
 /// A resolved input on par with [`NamespaceOpts`]: deciding *who* to run
-/// as is policy (the `orca` crate's `ExecSpec`); this crate merely
+/// as is policy (the `orca` crate's execution resolver); this crate merely
 /// executes `setgroups(groups)` → `setresgid(gid)` → `setresuid(uid)` in
 /// the child (uid last, saved ids included, so the drop is complete and
 /// shells do not enter their setuid security mode).
@@ -130,9 +130,29 @@ pub struct RunAs {
     pub uid: u32,
     /// Real/effective/saved gid to become.
     pub gid: u32,
-    /// Supplementary groups (from the host group database).
+    /// Resolved supplementary groups.
     pub groups: Vec<u32>,
 }
+
+/// Final execution values produced inside the container before privilege drop.
+pub struct Execution {
+    /// Complete nonempty argv.
+    pub cmd: Vec<String>,
+    /// Complete environment; also supplies PATH for executable lookup.
+    pub env: Vec<String>,
+    /// Working directory inside the container.
+    pub cwd: PathBuf,
+    /// Whether failure to enter cwd may fall back to `/`.
+    pub fallback_cwd: bool,
+    /// Resolved credentials.
+    pub run_as: RunAs,
+}
+
+/// Caller policy invoked after pivot_root and before dropping privileges.
+/// Runs only in the cloned child: implementations may read its rootfs but must
+/// not rely on parent-side effects, background threads or inherited locks.
+/// Return an error to abort initialization through the status pipe.
+pub type ExecResolver = std::sync::Arc<dyn Fn() -> Result<Execution, String> + Send + Sync>;
 
 /// Marker state: configured but not started.
 pub struct Created;
@@ -162,6 +182,7 @@ pub struct Container<S> {
     env: Vec<String>,
     cwd: PathBuf,
     run_as: Option<RunAs>,
+    resolver: Option<ExecResolver>,
     hostname: Option<String>,
     state: S,
 }
@@ -203,11 +224,7 @@ impl Container<Created> {
             None
         };
         let (init_etc, runtime_dir) = prepare_runtime_file_dirs(&self.session)?;
-        prepare_resolv_conf(
-            &init_etc,
-            &runtime_dir,
-            Path::new(ETC_RESOLV_CONF),
-        )?;
+        prepare_resolv_conf(&init_etc, &runtime_dir, Path::new(ETC_RESOLV_CONF))?;
         if let Some(hostname) = hostname {
             prepare_hostname_files(&init_etc, &runtime_dir, hostname)?;
         }
@@ -233,6 +250,7 @@ impl Container<Created> {
             env: &self.env,
             cwd: &self.cwd,
             run_as: self.run_as.as_ref(),
+            resolver: self.resolver.as_ref(),
             hostname,
             status_fd: status_w.as_raw_fd(),
             sock_fd: sock_child.as_raw_fd(),
@@ -292,6 +310,7 @@ impl Container<Created> {
             env: self.env,
             cwd: self.cwd,
             run_as: self.run_as,
+            resolver: self.resolver,
             hostname: self.hostname,
             state: Running {
                 child_pid,
@@ -302,9 +321,7 @@ impl Container<Created> {
     }
 }
 
-fn prepare_runtime_file_dirs(
-    session: &SessionPaths,
-) -> Result<(PathBuf, PathBuf), ContainerError> {
+fn prepare_runtime_file_dirs(session: &SessionPaths) -> Result<(PathBuf, PathBuf), ContainerError> {
     let init_etc = session.init_layer().join("etc");
     std::fs::create_dir_all(&init_etc).map_err(|source| ContainerError::RuntimeFile {
         path: init_etc.clone(),
@@ -397,6 +414,7 @@ impl Container<Running> {
             env: self.env,
             cwd: self.cwd,
             run_as: self.run_as,
+            resolver: self.resolver,
             hostname: self.hostname,
             state: Terminated { status },
         })
@@ -453,6 +471,7 @@ pub struct ContainerBuilder {
     env: Vec<String>,
     cwd: Option<PathBuf>,
     run_as: Option<RunAs>,
+    resolver: Option<ExecResolver>,
     hostname: Option<String>,
 }
 
@@ -470,6 +489,7 @@ impl ContainerBuilder {
             env: Vec::new(),
             cwd: None,
             run_as: None,
+            resolver: None,
             hostname: None,
         }
     }
@@ -504,7 +524,14 @@ impl ContainerBuilder {
         self
     }
 
-    /// Set the resolved argv (required; `ExecSpec` supplies it).
+    /// Defer execution policy to the child rootfs. Supersedes cmd/env/cwd/run_as.
+    /// The callback is invoked after pivot_root and may fail initialization.
+    pub fn resolve_exec(mut self, resolver: ExecResolver) -> Self {
+        self.resolver = Some(resolver);
+        self
+    }
+
+    /// Set resolved argv (required unless an execution resolver is supplied).
     pub fn cmd(mut self, cmd: Vec<String>) -> Self {
         self.cmd = Some(cmd);
         self
@@ -516,8 +543,7 @@ impl ContainerBuilder {
         self
     }
 
-    /// Set the resolved working directory (falls back to `/` inside the
-    /// container if it does not exist there).
+    /// Set the resolved working directory; chdir failure aborts startup.
     pub fn cwd(mut self, cwd: PathBuf) -> Self {
         self.cwd = Some(cwd);
         self
@@ -543,6 +569,7 @@ impl ContainerBuilder {
     pub fn build(self) -> Result<Container<Created>, ContainerError> {
         let cmd = match self.cmd {
             Some(c) if !c.is_empty() => c,
+            _ if self.resolver.is_some() => Vec::new(),
             _ => return Err(ContainerError::EmptyCommand),
         };
         Ok(Container {
@@ -554,6 +581,7 @@ impl ContainerBuilder {
             env: self.env,
             cwd: self.cwd.unwrap_or_else(|| PathBuf::from("/")),
             run_as: self.run_as,
+            resolver: self.resolver,
             hostname: self.hostname,
             state: Created,
         })

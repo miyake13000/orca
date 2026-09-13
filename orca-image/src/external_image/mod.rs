@@ -149,6 +149,9 @@ pub struct ImageManifest {
     pub env: Vec<String>,
     /// Image working directory.
     pub working_dir: PathBuf,
+    /// OCI User declaration (user[:group]).
+    #[serde(default)]
+    pub user: String,
     /// When the image was pulled.
     pub pulled_at: DateTime<Utc>,
 }
@@ -160,6 +163,7 @@ impl ImageManifest {
             entrypoint: self.entrypoint.clone(),
             cmd: self.cmd.clone(),
             env: self.env.clone(),
+            user: self.user.clone(),
             working_dir: if self.working_dir.as_os_str().is_empty() {
                 PathBuf::from("/")
             } else {
@@ -239,7 +243,9 @@ impl ImageIndex {
         let pos = self
             .images
             .iter()
-            .position(|m| m.registry == r.registry && m.repository == r.repository && m.tag == r.tag)
+            .position(|m| {
+                m.registry == r.registry && m.repository == r.repository && m.tag == r.tag
+            })
             .ok_or_else(|| IndexError::NotFound(reference.to_string()))?;
         Ok(self.images.remove(pos))
     }
@@ -323,6 +329,7 @@ mod tests {
             cmd: vec!["/bin/bash".into()],
             env: vec![],
             working_dir: "/".into(),
+            user: "app:workers".into(),
             pulled_at: Utc::now(),
         }
     }
@@ -366,5 +373,32 @@ mod tests {
             m.layers_top_first(),
             vec![LayerDigest([2; 32]), LayerDigest([1; 32])]
         );
+    }
+}
+
+#[cfg(test)]
+mod user_tests {
+    use super::*;
+    #[test]
+    fn manifest_user_survives_index_and_config_conversion() {
+        let record: ImageManifest = toml::from_str(
+            r#"
+digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+registry = "docker.io"
+repository = "test"
+tag = "latest"
+layers = []
+entrypoint = []
+cmd = ["serve"]
+env = []
+working_dir = "/app"
+user = "app:workers"
+pulled_at = "2024-01-01T00:00:00Z"
+"#,
+        )
+        .unwrap();
+        assert_eq!(record.config().user, "app:workers");
+        let copy: ImageManifest = toml::from_str(&toml::to_string(&record).unwrap()).unwrap();
+        assert_eq!(copy.user, record.user);
     }
 }

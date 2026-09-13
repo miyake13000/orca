@@ -17,8 +17,8 @@ mod image;
 pub mod mount;
 
 pub use container::{
-    Container, ContainerBuilder, ContainerError, Created, IoMode, NamespaceOpts, RunAs, Running,
-    Terminated,
+    Container, ContainerBuilder, ContainerError, Created, ExecResolver, Execution, IoMode,
+    NamespaceOpts, RunAs, Running, Terminated,
 };
 pub use image::{OverlayMount, Rootfs, SessionPaths};
 

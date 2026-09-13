@@ -92,8 +92,8 @@ impl Change {
 /// Git-ignore-style exclusion patterns for diff computation.
 ///
 /// This is diff vocabulary (like [`Change`]): the type owns parsing and
-/// matching only — where the patterns come from (envs.toml `[defaults]` /
-/// `[envs.settings]`) is the `orca` crate's concern and never leaks here.
+/// matching only — loading and merging config.toml and CLI overrides is
+/// the `orca` crate's concern and never leaks here.
 ///
 /// Pattern forms (a subset of gitignore):
 /// - `/xxx/yyy` — anchored at the filesystem root; any pattern containing
@@ -101,11 +101,13 @@ impl Change {
 /// - `xxx` — no slash: matches a file/directory *name* at any depth.
 /// - Wildcards `*` (never crosses a path separator) and `?`.
 ///
+/// `!pattern` re-includes a match; the last matching rule wins. An excluded
+/// parent must itself be re-included before descendants can be included.
 /// A match on a directory hides its entire subtree. Parsing cannot fail;
 /// empty patterns are skipped.
 #[derive(Debug, Clone, Default)]
 pub struct Blacklist {
-    patterns: Vec<Pattern>,
+    patterns: Vec<(bool, Pattern)>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,7 +126,8 @@ impl Blacklist {
             .map(|p| p.trim())
             .filter(|p| !p.is_empty())
             .map(|p| {
-                if p.contains('/') {
+                let (include, p) = p.strip_prefix('!').map(|p| (true, p)).unwrap_or((false, p));
+                let pattern = if p.contains('/') {
                     Pattern::Anchored(
                         p.trim_matches('/')
                             .split('/')
@@ -134,7 +137,8 @@ impl Blacklist {
                     )
                 } else {
                     Pattern::Name(p.to_string())
-                }
+                };
+                (include, pattern)
             })
             .collect();
         Self { patterns }
@@ -152,17 +156,25 @@ impl Blacklist {
             .components()
             .filter_map(|c| c.as_os_str().to_str())
             .collect();
-        self.patterns.iter().any(|pattern| match pattern {
-            Pattern::Name(glob) => components.iter().any(|c| glob_match(glob, c)),
-            Pattern::Anchored(segments) => {
-                // Matching a prefix of the components = the pattern names
-                // this path or one of its ancestors.
-                segments.len() <= components.len()
-                    && segments
-                        .iter()
-                        .zip(&components)
-                        .all(|(glob, c)| glob_match(glob, c))
+        // A child cannot re-include itself while an ancestor stays excluded.
+        (1..=components.len()).any(|len| {
+            let mut hidden = false;
+            for (include, pattern) in &self.patterns {
+                let matches = match pattern {
+                    Pattern::Name(glob) => glob_match(glob, components[len - 1]),
+                    Pattern::Anchored(segments) => {
+                        segments.len() == len
+                            && segments
+                                .iter()
+                                .zip(&components[..len])
+                                .all(|(glob, c)| glob_match(glob, c))
+                    }
+                };
+                if matches {
+                    hidden = !include;
+                }
             }
+            hidden
         })
     }
 }
@@ -337,7 +349,10 @@ fn shadowed_by_ancestor(merged: &BTreeMap<PathBuf, Node>, rel: &Path, layer_idx:
         match merged.get(anc) {
             Some(Node::Whiteout { layer }) if *layer < layer_idx => return true,
             Some(Node::Entry {
-                is_dir, opaque, layer, ..
+                is_dir,
+                opaque,
+                layer,
+                ..
             }) if *layer < layer_idx && (!*is_dir || *opaque) => return true,
             _ => {}
         }
@@ -425,7 +440,10 @@ fn list_base_under(base: &[Layer], rel: &Path) -> Result<Vec<PathBuf>, DiffError
                 if names.contains_key(&name) {
                     continue;
                 }
-                let emd = entry.path().symlink_metadata().map_err(|e| io_err(&entry.path(), e))?;
+                let emd = entry
+                    .path()
+                    .symlink_metadata()
+                    .map_err(|e| io_err(&entry.path(), e))?;
                 let value = if whiteout::is_whiteout(&emd) {
                     None
                 } else {
@@ -539,8 +557,12 @@ mod tests {
         touch(bottom.path(), "etc/conf");
         touch(bottom.path(), "etc/other");
 
-        let got = changes(&[layer(top.path()), layer(bottom.path())], &[layer(base.path())], None)
-            .unwrap();
+        let got = changes(
+            &[layer(top.path()), layer(bottom.path())],
+            &[layer(base.path())],
+            None,
+        )
+        .unwrap();
         assert_eq!(
             got,
             vec![
@@ -680,10 +702,16 @@ mod tests {
         whiteout::set_opaque(&new.path().join("opt/app")).unwrap();
 
         let got = changes(&[layer(new.path())], &[layer(base.path())], None).unwrap();
-        assert!(got.contains(&Change::Delete { path: "etc/remove.me".into() }));
+        assert!(got.contains(&Change::Delete {
+            path: "etc/remove.me".into()
+        }));
         assert!(!got.iter().any(|c| c.path() == Path::new("etc/ghost")));
-        assert!(got.contains(&Change::Delete { path: "opt/app/drop/deep".into() }));
-        assert!(got.contains(&Change::Delete { path: "opt/app/drop".into() }));
+        assert!(got.contains(&Change::Delete {
+            path: "opt/app/drop/deep".into()
+        }));
+        assert!(got.contains(&Change::Delete {
+            path: "opt/app/drop".into()
+        }));
         assert!(got.contains(&Change::Modify {
             path: "opt/app/keep".into(),
             source: new.path().join("opt/app/keep"),
@@ -698,5 +726,28 @@ mod tests {
             .position(|c| c.path() == Path::new("opt/app/drop/deep"))
             .unwrap();
         assert!(deep_pos < drop_pos);
+    }
+}
+
+#[cfg(test)]
+mod negation_tests {
+    use super::*;
+    #[test]
+    fn ordered_exceptions_and_parent_pruning() {
+        let b = Blacklist::parse(&["*.log".into(), "!keep.log".into()]);
+        assert!(b.hides(Path::new("a/no.log")));
+        assert!(!b.hides(Path::new("a/keep.log")));
+        let b = Blacklist::parse(&["cache".into(), "!cache/keep".into()]);
+        assert!(b.hides(Path::new("cache/keep")));
+        let b = Blacklist::parse(&[
+            "cache".into(),
+            "!cache".into(),
+            "cache/*".into(),
+            "!cache/keep".into(),
+        ]);
+        assert!(!b.hides(Path::new("cache/keep")));
+        assert!(b.hides(Path::new("cache/other")));
+        let b = Blacklist::parse(&["*.log".into(), "!keep.log".into(), "keep.log".into()]);
+        assert!(b.hides(Path::new("keep.log")));
     }
 }

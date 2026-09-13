@@ -67,67 +67,10 @@ pub fn orca_root() -> PathBuf {
         .join("orca")
 }
 
-/// Optional per-environment configuration, used both for the global
-/// `[defaults]` table and the per-env `[envs.settings]` table in
-/// envs.toml.
-///
-/// The ImageConfig-shaped fields are `Option` (None = fall through to the
-/// next source in the priority chain "CLI args > env-specific > defaults >
-/// image declaration"); `blacklist` merges as a union instead. The
-/// blacklist patterns themselves are interpreted by
-/// `orca_image::Blacklist` (diff vocabulary) — this type only carries the
-/// strings.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct EnvSettings {
-    /// Override for the image entrypoint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entrypoint: Option<Vec<String>>,
-    /// Override for the image cmd (also the default command for
-    /// host-based environments).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cmd: Option<Vec<String>>,
-    /// Extra / overriding environment variables (`KEY=VALUE`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env: Option<Vec<String>>,
-    /// Override for the working directory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub working_dir: Option<PathBuf>,
-    /// Git-ignore-style patterns excluded from diff / apply (never from
-    /// commit).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub blacklist: Vec<String>,
-}
-
-impl EnvSettings {
-    /// Merge `defaults` (the `[defaults]` table) with `specific` (the
-    /// env's own `[envs.settings]`): specific `Some` fields replace
-    /// wholesale, blacklists concatenate (union).
-    pub fn merged(defaults: &EnvSettings, specific: &EnvSettings) -> EnvSettings {
-        EnvSettings {
-            entrypoint: specific
-                .entrypoint
-                .clone()
-                .or_else(|| defaults.entrypoint.clone()),
-            cmd: specific.cmd.clone().or_else(|| defaults.cmd.clone()),
-            env: specific.env.clone().or_else(|| defaults.env.clone()),
-            working_dir: specific
-                .working_dir
-                .clone()
-                .or_else(|| defaults.working_dir.clone()),
-            blacklist: defaults
-                .blacklist
-                .iter()
-                .chain(specific.blacklist.iter())
-                .cloned()
-                .collect(),
-        }
-    }
-}
-
 /// One environment record plus its resolved filesystem locations.
 ///
-/// Serialized into `envs.toml` (the `root` and `effective_settings`
-/// fields are derived, not stored).
+/// Serialized into `envs.toml`; runtime paths and the external-image handle
+/// are injected, not stored. User configuration lives separately in Config.
 /// Invariant: `name` is non-empty and unique within the store.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Env {
@@ -140,27 +83,19 @@ pub struct Env {
     pub base_ref: BaseImageRef,
     /// Creation time.
     pub created_at: DateTime<Utc>,
-    /// Per-env configuration (`[envs.settings]`), if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub settings: Option<EnvSettings>,
-    /// orca data root; injected after deserialization.
+    /// Environment contents directory; injected after deserialization.
     #[serde(skip)]
-    root: PathBuf,
-    /// `[defaults]` merged with `settings`; computed on load/create.
+    envs_dir: PathBuf,
     #[serde(skip)]
-    effective_settings: EnvSettings,
+    run_dir: PathBuf,
+    #[serde(skip)]
+    external_images: ExternalImageStore,
 }
 
 impl Env {
-    /// The effective configuration: `[defaults]` overlaid with this
-    /// env's `[envs.settings]` (blacklist = union of both).
-    pub fn settings(&self) -> &EnvSettings {
-        &self.effective_settings
-    }
-
     /// The environment directory (`envs/<uuid>/`).
     pub fn env_path(&self) -> PathBuf {
-        self.root.join("envs").join(self.uuid.to_string())
+        self.envs_dir.join(self.uuid.to_string())
     }
 
     /// The commit graph file (`envs/<uuid>/commits.toml`).
@@ -187,16 +122,13 @@ impl Env {
     /// The run lock (`run/<uuid>/lock`), owned by the orca lib; may exist
     /// while no session does.
     pub fn lock_path(&self) -> PathBuf {
-        self.root.join("run").join(self.uuid.to_string()).join("lock")
+        self.run_dir.join(self.uuid.to_string()).join("lock")
     }
 
     /// The per-run session directory (`run/<uuid>/session/`), created and
     /// destroyed wholesale by `orca-container`.
     pub fn session_path(&self) -> PathBuf {
-        self.root
-            .join("run")
-            .join(self.uuid.to_string())
-            .join("session")
+        self.run_dir.join(self.uuid.to_string()).join("session")
     }
 
     /// Overlay workdir (`run/<uuid>/session/work/`).
@@ -237,7 +169,7 @@ impl Env {
     /// `base_ref` is a foreign key into it, and resolving one's own
     /// foreign key is this type's job.
     pub(crate) fn external_images(&self) -> ExternalImageStore {
-        ExternalImageStore::new(&self.root)
+        self.external_images.clone()
     }
 }
 
@@ -246,41 +178,46 @@ impl Env {
 struct EnvsFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     current: Option<Uuid>,
-    /// Global `[defaults]` applied to every env (under its own settings).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    defaults: Option<EnvSettings>,
     #[serde(default)]
     envs: Vec<Env>,
 }
 
 /// Manages `envs/`: the `envs.toml` index and environment directories.
 pub struct EnvStore {
-    root: PathBuf,
+    run_dir: PathBuf,
+    external_images: ExternalImageStore,
     envs_dir: PathBuf,
+    file: PathBuf,
     data: EnvsFile,
 }
 
 impl EnvStore {
-    /// Load the store from the data root (missing `envs.toml` = empty
-    /// store). Public entry: [`crate::Orca::envs`].
-    pub(crate) fn load(root: &Path) -> Result<Self, EnvError> {
-        let root = root.to_path_buf();
-        let base_path = root.join("envs");
-        let file = base_path.join("envs.toml");
+    /// Load management metadata from `file`, with independently supplied contents,
+    /// runtime and image locations. Missing index means an empty store.
+    /// Does not read or write user configuration. I/O and TOML errors are returned.
+    /// Normal entry: [`crate::Orca::envs`].
+    pub fn load(
+        file: &Path,
+        envs_dir: &Path,
+        run_dir: &Path,
+        external_images: ExternalImageStore,
+    ) -> Result<Self, EnvError> {
+        let base_path = envs_dir.to_path_buf();
         let mut data: EnvsFile = match std::fs::read_to_string(&file) {
             Ok(text) => toml::from_str(&text)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => EnvsFile::default(),
             Err(e) => return Err(e.into()),
         };
-        let defaults = data.defaults.clone().unwrap_or_default();
         for env in &mut data.envs {
-            env.root = root.clone();
-            env.effective_settings =
-                EnvSettings::merged(&defaults, env.settings.as_ref().unwrap_or(&Default::default()));
+            env.envs_dir = envs_dir.into();
+            env.run_dir = run_dir.into();
+            env.external_images = external_images.clone();
         }
         Ok(Self {
-            root,
+            run_dir: run_dir.into(),
+            external_images,
             envs_dir: base_path,
+            file: file.into(),
             data,
         })
     }
@@ -342,9 +279,9 @@ impl EnvStore {
             name,
             base_ref,
             created_at: Utc::now(),
-            settings: None,
-            root: self.root.clone(),
-            effective_settings: self.data.defaults.clone().unwrap_or_default(),
+            envs_dir: self.envs_dir.clone(),
+            run_dir: self.run_dir.clone(),
+            external_images: self.external_images.clone(),
         };
         std::fs::create_dir_all(env.upper_path())?;
         std::fs::create_dir_all(env.layers_path())?;
@@ -366,7 +303,7 @@ impl EnvStore {
             });
         }
         let env_path = env.env_path();
-        let run_path = self.root.join("run").join(uuid.to_string());
+        let run_path = self.run_dir.join(uuid.to_string());
         for path in [env_path, run_path] {
             match std::fs::remove_dir_all(&path) {
                 Ok(()) => {}
@@ -408,7 +345,10 @@ impl EnvStore {
     pub fn save(&self) -> Result<(), EnvError> {
         std::fs::create_dir_all(&self.envs_dir)?;
         let text = toml::to_string_pretty(&self.data)?;
-        std::fs::write(self.envs_dir.join("envs.toml"), text)?;
+        if let Some(parent) = self.file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&self.file, text)?;
         Ok(())
     }
 }
@@ -418,7 +358,7 @@ mod tests {
     use super::*;
 
     fn store(dir: &Path) -> EnvStore {
-        EnvStore::load(dir).unwrap()
+        crate::Orca::new(dir).envs().unwrap()
     }
 
     #[test]
@@ -449,61 +389,6 @@ mod tests {
     }
 
     #[test]
-    fn settings_merge_and_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut s = store(dir.path());
-        s.create("cfg".into(), BaseImageRef::Host).unwrap();
-        s.save().unwrap();
-
-        // Add per-env [envs.settings] and global [defaults] the way a
-        // user would: by editing envs.toml. [envs.settings] attaches to
-        // the most recent [[envs]] element.
-        let file = dir.path().join("envs/envs.toml");
-        let mut text = std::fs::read_to_string(&file).unwrap();
-        text.push_str("\n[envs.settings]\ncmd = [\"/bin/zsh\"]\nblacklist = [\"/var/log\"]\n");
-        text.push_str(
-            "\n[defaults]\ncmd = [\"/bin/bash\"]\nenv = [\"EDITOR=vim\"]\nblacklist = [\"*.history\"]\n",
-        );
-        std::fs::write(&file, &text).unwrap();
-
-        let s = store(dir.path());
-        let env = s.find_by_name("cfg").unwrap();
-        let settings = env.settings();
-        // Specific replaces wholesale...
-        assert_eq!(settings.cmd, Some(vec!["/bin/zsh".to_string()]));
-        // ...unset fields fall through to defaults...
-        assert_eq!(settings.env, Some(vec!["EDITOR=vim".to_string()]));
-        assert_eq!(settings.entrypoint, None);
-        // ...and blacklists union (defaults first).
-        assert_eq!(settings.blacklist, vec!["*.history", "/var/log"]);
-
-        // Saving keeps both tables intact.
-        s.save().unwrap();
-        let s = store(dir.path());
-        let env = s.find_by_name("cfg").unwrap();
-        assert_eq!(env.settings().blacklist, vec!["*.history", "/var/log"]);
-    }
-
-    #[test]
-    fn merged_prefers_specific_and_unions_blacklist() {
-        let defaults = EnvSettings {
-            cmd: Some(vec!["a".into()]),
-            working_dir: Some("/d".into()),
-            blacklist: vec!["x".into()],
-            ..Default::default()
-        };
-        let specific = EnvSettings {
-            cmd: Some(vec!["b".into()]),
-            blacklist: vec!["y".into()],
-            ..Default::default()
-        };
-        let merged = EnvSettings::merged(&defaults, &specific);
-        assert_eq!(merged.cmd, Some(vec!["b".to_string()]));
-        assert_eq!(merged.working_dir, Some("/d".into()));
-        assert_eq!(merged.blacklist, vec!["x", "y"]);
-    }
-
-    #[test]
     fn duplicate_and_invalid_names_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = store(dir.path());
@@ -524,5 +409,34 @@ mod tests {
             s.create(Uuid::new_v4().to_string(), BaseImageRef::Host),
             Err(EnvError::InvalidName(_))
         ));
+    }
+    #[test]
+    fn independent_paths_and_user_config_is_never_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("metadata/index.toml");
+        let envs = dir.path().join("contents");
+        let run = dir.path().join("runtime");
+        let images = ExternalImageStore::new(
+            &dir.path().join("image-index.toml"),
+            &dir.path().join("blobs"),
+        );
+        let config = dir.path().join("config.toml");
+        let text = "# retained comment\n[envs.future]\nuser = \"12345\"\n";
+        std::fs::write(&config, text).unwrap();
+        let mut store = EnvStore::load(&index, &envs, &run, images.clone()).unwrap();
+        let env = store.create("future".into(), BaseImageRef::Host).unwrap();
+        let id = env.uuid;
+        assert!(env.upper_path().starts_with(&envs));
+        assert!(env.lock_path().starts_with(&run));
+        store.set_current(&id).unwrap();
+        store.save().unwrap();
+        let mut store = EnvStore::load(&index, &envs, &run, images).unwrap();
+        assert_eq!(store.current().unwrap().uuid, id);
+        store.delete(&id).unwrap();
+        store.save().unwrap();
+        assert_eq!(std::fs::read_to_string(config).unwrap(), text);
+        let text = std::fs::read_to_string(index).unwrap();
+        assert!(!text.contains("settings"));
+        assert!(!text.contains("global"));
     }
 }

@@ -1,20 +1,16 @@
 //! [`ExternalImageStore`]: the shared pulled-image area (`images/`).
 //!
-//! Owns the on-disk layout policy of the image area — the index file
-//! name and the blob CAS location — so neither the CLI nor `orca-image`
-//! has to know it. `orca-image` provides the mechanisms ([`ImageIndex`],
-//! [`LayerBlobStore`], [`Downloader`]); this type wires them to paths.
+//! Wires caller-supplied index and blob paths to the mechanisms provided
+//! by `orca-image` ([`ImageIndex`], [`LayerBlobStore`], [`Downloader`]).
+//! The normal layout is chosen by Orca, not inferred from a data root here.
 
 use std::path::{Path, PathBuf};
 
 use orca_image::Layer;
 use orca_image::external_image::{
-    BlobStoreError, Downloader, ImageDigest, ImageIndex, ImageManifest, IndexError,
-    LayerBlobStore, PullError,
+    BlobStoreError, Downloader, ImageDigest, ImageIndex, ImageManifest, IndexError, LayerBlobStore,
+    PullError,
 };
-
-/// File name of the image index inside `images/`.
-const IMAGE_FILE_NAME: &str = "images.toml";
 
 /// Errors from image store operations.
 #[derive(Debug, thiserror::Error)]
@@ -32,25 +28,28 @@ pub enum ExternalImageError {
 
 /// The shared image area under the orca data root: the `images.toml`
 /// index plus the extracted-blob CAS (`images/layers/sha256/`).
+#[derive(Debug, Clone, Default)]
 pub struct ExternalImageStore {
-    dir: PathBuf,
+    index_file: PathBuf,
+    blobs_dir: PathBuf,
 }
 
 impl ExternalImageStore {
-    /// Open the image area under the orca data root.
-    pub fn new(orca_root: &Path) -> Self {
+    /// Bind independently supplied metadata and layer directories. No I/O.
+    pub fn new(index_file: &Path, blobs_dir: &Path) -> Self {
         Self {
-            dir: orca_root.join("images"),
+            index_file: index_file.into(),
+            blobs_dir: blobs_dir.into(),
         }
     }
 
     fn index(&self) -> Result<ImageIndex, ExternalImageError> {
-        Ok(ImageIndex::load(&self.dir.join(IMAGE_FILE_NAME))?)
+        Ok(ImageIndex::load(&self.index_file)?)
     }
 
     /// The extracted-blob CAS directory (`images/layers/sha256/`).
     pub(crate) fn blobs_dir(&self) -> PathBuf {
-        self.dir.join("layers").join("sha256")
+        self.blobs_dir.clone()
     }
 
     fn blobs(&self) -> LayerBlobStore {

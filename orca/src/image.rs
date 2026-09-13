@@ -83,7 +83,7 @@ pub struct Image<'a> {
     commit_store: CommitStore,
     layer_store: LayerStore,
     commits: CommitsData,
-    /// Parsed from the env's effective settings; applied to diff / apply
+    /// Caller-supplied resolved exclusions; applied to diff / apply
     /// (never to commit — DESIGN §6).
     blacklist: Blacklist,
 }
@@ -95,7 +95,7 @@ impl<'a> Image<'a> {
         let commit_store = CommitStore::new(&env.commits_path());
         let layer_store = LayerStore::new(&env.layers_path());
         let commits = commit_store.load()?;
-        let blacklist = Blacklist::parse(&env.settings().blacklist);
+        let blacklist = Blacklist::default();
         Ok(Self {
             env,
             commit_store,
@@ -103,6 +103,13 @@ impl<'a> Image<'a> {
             commits,
             blacklist,
         })
+    }
+
+    /// Add resolved global/env/argument exclusions to this operation handle.
+    /// Does not affect commits or mutate the environment index.
+    pub fn with_blacklist(mut self, patterns: &[String]) -> Self {
+        self.blacklist = Blacklist::parse(patterns);
+        self
     }
 
     /// The blacklist to hand to `changes()` (None when unconfigured).
@@ -350,11 +357,7 @@ impl<'a> Image<'a> {
     /// - `diff(Some(a), None)` — commit `a`'s cumulative changes vs base.
     /// - `diff(Some(a), Some(b))` — `a` vs `b` (both resolved like
     ///   checkout targets, ROOT included).
-    pub fn diff(
-        &self,
-        a: Option<&str>,
-        b: Option<&str>,
-    ) -> Result<Vec<Change>, ImageError> {
+    pub fn diff(&self, a: Option<&str>, b: Option<&str>) -> Result<Vec<Change>, ImageError> {
         let material = self.container_image()?;
         match (a, b) {
             (None, _) => {
@@ -498,7 +501,7 @@ mod tests {
     /// Build a store + host env in a temp dir, mimicking `orca init`
     /// (`create` writes the initial commit graph itself).
     fn setup(dir: &Path) -> (EnvStore, uuid::Uuid) {
-        let mut store = EnvStore::load(dir).unwrap();
+        let mut store = crate::Orca::new(dir).envs().unwrap();
         let uuid = store.create("t".into(), BaseImageRef::Host).unwrap().uuid;
         store.save().unwrap();
         (store, uuid)
@@ -520,7 +523,12 @@ mod tests {
         let mut image = env.image().unwrap();
         let hash = image.commit("add foo").unwrap();
         // diff/ is empty again; the layer holds the file.
-        assert!(std::fs::read_dir(env.upper_path()).unwrap().next().is_none());
+        assert!(
+            std::fs::read_dir(env.upper_path())
+                .unwrap()
+                .next()
+                .is_none()
+        );
         assert!(
             env.layers_path()
                 .join(to_hex(&hash))
@@ -540,10 +548,7 @@ mod tests {
         image.commit("c1").unwrap();
 
         write_upper(env, "dirty", b"x");
-        assert!(matches!(
-            image.checkout("ROOT"),
-            Err(ImageError::NotClean)
-        ));
+        assert!(matches!(image.checkout("ROOT"), Err(ImageError::NotClean)));
         image.clean().unwrap();
         let head = image.checkout("ROOT").unwrap();
         assert!(matches!(head, Head::Detached(_)));
@@ -580,10 +585,7 @@ mod tests {
         let lock = LockFile::acquire(&env.lock_path()).unwrap();
 
         let mut image = env.image().unwrap();
-        assert!(matches!(
-            image.commit("x"),
-            Err(ImageError::Running(_))
-        ));
+        assert!(matches!(image.commit("x"), Err(ImageError::Running(_))));
         assert!(matches!(image.clean(), Err(ImageError::Running(_))));
         lock.release().unwrap();
         image.commit("x").unwrap();
@@ -598,7 +600,7 @@ mod tests {
 
         let digest = ImageDigest([9; 32]);
         let layer = LayerDigest([8; 32]);
-        let mut store = EnvStore::load(dir).unwrap();
+        let mut store = crate::Orca::new(dir).envs().unwrap();
         let uuid = {
             let env = store
                 .create(
@@ -621,6 +623,7 @@ mod tests {
                     cmd: vec![],
                     env: vec![],
                     working_dir: "/".into(),
+                    user: String::new(),
                     pulled_at: chrono::Utc::now(),
                 })
                 .unwrap();
@@ -659,18 +662,22 @@ mod tests {
     fn diff_respects_blacklist_from_settings() {
         let dir = tempfile::tempdir().unwrap();
         let (_, uuid) = setup_guest(dir.path());
-        // Configure a [defaults] blacklist the way a user would: by
-        // editing envs.toml, then reloading the store.
-        let file = dir.path().join("envs/envs.toml");
-        let mut text = std::fs::read_to_string(&file).unwrap();
-        text.push_str("\n[defaults]\nblacklist = [\"*.secret\"]\n");
-        std::fs::write(&file, &text).unwrap();
-        let store = EnvStore::load(dir.path()).unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[global]\nblacklist = [\"*.secret\"]\n",
+        )
+        .unwrap();
+        let orca = crate::Orca::new(dir.path());
+        let config = orca.config().unwrap();
+        let store = orca.envs().unwrap();
         let env = store.find_by_id(&uuid).unwrap();
 
         write_upper(env, "keep.txt", b"1");
         write_upper(env, "x.secret", b"2");
-        let image = env.image().unwrap();
+        let settings = config
+            .resolve(&env.name, &crate::Settings::default())
+            .unwrap();
+        let image = env.image().unwrap().with_blacklist(&settings.blacklist);
         let list = image.diff(None, None).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].path(), Path::new("keep.txt"));
@@ -689,9 +696,6 @@ mod tests {
             )
             .unwrap();
         let image = guest.image().unwrap();
-        assert!(matches!(
-            image.plan_apply(false),
-            Err(ImageError::HostOnly)
-        ));
+        assert!(matches!(image.plan_apply(false), Err(ImageError::HostOnly)));
     }
 }
